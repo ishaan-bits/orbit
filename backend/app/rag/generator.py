@@ -11,7 +11,7 @@ from app.core.config import settings
 
 logger = logging.getLogger("orbit.rag.generator")
 
-MODEL_NAME = "gemini-2.5-flash"
+MODEL_NAME = "gemini-3.8-flash"
 REQUEST_TIMEOUT = 60.0
 
 SYSTEM_PROMPT = (

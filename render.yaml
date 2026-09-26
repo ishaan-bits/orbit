@@ -1,0 +1,43 @@
+# Render blueprint — Orbit API (FastAPI)
+# Docs: https://render.com/docs/blueprint-spec
+#
+# Frontend deploys separately on Vercel (see vercel.json + README).
+# After the first deploy, set CORS_ORIGINS to your Vercel URL.
+
+services:
+  - type: web
+    name: orbit-api
+    runtime: python
+    plan: starter # adjust to your plan
+    region: oregon
+    buildCommand: cd backend && pip install -r requirements.txt && alembic upgrade head
+    startCommand: cd backend && uvicorn app.main:app --host 0.0.0.0 --port "$PORT"
+    healthCheckPath: /api/health
+    envVars:
+      - key: ENVIRONMENT
+        value: production
+      - key: DEBUG
+        value: "false"
+      # Seeds the NovaTech demo tenant (folders + 3 accounts) on first launch.
+      # Set to "false" for a real deployment.
+      - key: SEED_DEMO
+        value: "true"
+      - key: DATABASE_URL
+        value: sqlite:////var/data/orbit.db
+      - key: CHROMA_PATH
+        value: /var/data/chroma_db
+      - key: UPLOADS_DIR
+        value: /var/data/uploads
+      - key: JWT_SECRET
+        generateValue: true
+      - key: COOKIE_SECURE
+        value: "true"
+      # Comma-separated list, e.g. https://orbit.vercel.app
+      - key: CORS_ORIGINS
+        sync: false
+      - key: GEMINI_API_KEY
+        sync: false
+    disk:
+      name: orbit-data
+      mountPath: /var/data
+      sizeGB: 1

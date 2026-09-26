@@ -1,0 +1,10 @@
+.git
+.env
+**/node_modules
+frontend/.next
+**/__pycache__
+**/*.py[cod]
+backend/.venv
+backend/data/*.db
+**/.pytest_cache
+**/.ruff_cache

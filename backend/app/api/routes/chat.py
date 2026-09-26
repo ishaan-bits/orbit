@@ -219,7 +219,14 @@ def _collect_sources(candidates: list) -> list[ChatSource]:
         if key in seen:
             continue
         seen.add(key)
-        sources.append(ChatSource(document=candidate.filename, page=candidate.page))
+        sources.append(
+            ChatSource(
+                document=candidate.filename,
+                page=candidate.page,
+                document_id=candidate.document_id,
+                score=candidate.score,
+            )
+        )
     return sources
 
 

@@ -24,6 +24,8 @@ class Candidate:
     filename: str
     page: int
     chunk_index: int
+    # Relevance probability in [0, 1]; set by the reranker on its copies.
+    score: Optional[float] = None
 
 
 def retrieve(query: str, top_k: int = DEFAULT_TOP_K) -> list[Candidate]:

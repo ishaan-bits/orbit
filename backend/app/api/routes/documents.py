@@ -1,4 +1,5 @@
 import logging
+import mimetypes
 from pathlib import Path
 from typing import Optional
 
@@ -12,6 +13,7 @@ from fastapi import (
     UploadFile,
     status,
 )
+from fastapi.responses import FileResponse
 from sqlalchemy.orm import Session
 
 from app.api.deps import get_current_user
@@ -50,6 +52,15 @@ def _require_document_access(db: Session, user: User, document) -> None:
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Your role does not have access to this document",
         )
+
+
+def _media_type(document) -> str:
+    """Correct MIME type for streaming, falling back to the extension."""
+    mime = (document.mime_type or "").strip().lower()
+    if mime not in {"", "application/octet-stream"}:
+        return mime
+    guessed, _ = mimetypes.guess_type(document.original_filename)
+    return guessed or "application/octet-stream"
 
 
 @router.post(
@@ -139,6 +150,41 @@ def get_document(
         ) from None
     _require_document_access(db, user, document)
     return DocumentResponse.model_validate(document)
+
+
+@router.get("/documents/{document_id}/file")
+def get_document_file(
+    document_id: str,
+    db: Session = Depends(get_db),
+    uploads_dir: Path = Depends(get_uploads_dir),
+    user: User = Depends(get_current_user),
+) -> FileResponse:
+    """Stream the original stored file to an authorized caller.
+
+    Requires the session JWT (HTTP-only cookie or Bearer header), enforces
+    the caller's role on the document, and answers with the correct MIME
+    type. The bytes are streamed from disk — nothing is exposed publicly.
+    """
+    try:
+        document = documents_service.get_document(db, document_id)
+    except DocumentNotFoundError:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Document '{document_id}' was not found",
+        ) from None
+    _require_document_access(db, user, document)
+
+    path = uploads_dir / document.stored_filename
+    if not path.is_file():
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="The stored file is no longer available",
+        )
+    return FileResponse(
+        path,
+        media_type=_media_type(document),
+        filename=document.original_filename,
+    )
 
 
 @router.delete("/documents/{document_id}", response_model=DocumentDeleteResponse)

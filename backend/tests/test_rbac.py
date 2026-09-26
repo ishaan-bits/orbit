@@ -252,6 +252,7 @@ def test_opening_forbidden_document_returns_403(client: TestClient) -> None:
 
     register(client, "hr@orbit.test", role="HR")
     assert client.get(f"/api/documents/{doc['id']}").status_code == 403
+    assert client.get(f"/api/documents/{doc['id']}/file").status_code == 403
     assert client.post(f"/api/documents/{doc['id']}/index").status_code == 403
     assert client.delete(f"/api/documents/{doc['id']}").status_code == 403
 

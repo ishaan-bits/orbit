@@ -40,6 +40,14 @@ export interface DeleteResult {
   status: string;
 }
 
+export interface IndexResult {
+  document_id: string;
+  status: string;
+  progress: number;
+  chunk_count: number;
+  error: string | null;
+}
+
 export class ApiError extends Error {
   status: number;
 
@@ -138,9 +146,20 @@ export const api = {
   },
 
   deleteDocument(id: string): Promise<DeleteResult> {
-    return request<DeleteResult>(`/api/documents/${id}`, {
+    return request<DeleteResult>(`/api/documents/${encodeURIComponent(id)}`, {
       method: "DELETE",
     });
+  },
+
+  indexDocument(id: string): Promise<IndexResult> {
+    return request<IndexResult>(
+      `/api/documents/${encodeURIComponent(id)}/index`,
+      { method: "POST" },
+    );
+  },
+
+  getDocument(id: string): Promise<DocumentMeta> {
+    return request<DocumentMeta>(`/api/documents/${encodeURIComponent(id)}`);
   },
 
   chatHistory(): Promise<ChatHistoryResponse> {
@@ -238,6 +257,24 @@ export interface AnalyticsRecent {
 export interface ChatSource {
   document: string;
   page: number;
+  /** Document id powering the PDF viewer; null on legacy messages. */
+  document_id?: string | null;
+  /** Relevance probability in [0, 1] when the reranker scored it. */
+  score?: number | null;
+}
+
+/**
+ * Cookie-authenticated URL for the original stored file. Same-origin by
+ * default, so the HTTP-only session JWT rides along — nothing is public.
+ */
+export function documentFileUrl(documentId: string): string {
+  return `${API_BASE}/api/documents/${encodeURIComponent(documentId)}/file`;
+}
+
+/** Deep link into the document viewer, optionally at a cited page. */
+export function viewerHref(documentId: string, page?: number): string {
+  const base = `/viewer/${encodeURIComponent(documentId)}`;
+  return page ? `${base}?page=${page}` : base;
 }
 
 export interface ChatMessage {

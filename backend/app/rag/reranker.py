@@ -5,7 +5,9 @@ falls back to the incoming (fusion) order so chat keeps working.
 """
 
 import logging
+import math
 import threading
+from dataclasses import replace
 
 from app.rag.retriever import Candidate
 
@@ -33,7 +35,13 @@ def get_model():
 def rerank(
     query: str, candidates: list[Candidate], top_k: int = DEFAULT_TOP_K
 ) -> list[Candidate]:
-    """Score candidates with the cross-encoder and return the best ``top_k``."""
+    """Score candidates with the cross-encoder and return the best ``top_k``.
+
+    Returned candidates are copies carrying ``score`` — the sigmoid of the
+    cross-encoder logit, i.e. a relevance probability in ``[0, 1]``. Input
+    candidates are never mutated (they may be shared cache entries) and the
+    ranking itself is unchanged.
+    """
     if not candidates:
         return []
 
@@ -46,7 +54,19 @@ def rerank(
 
     scored = list(zip(candidates, [float(score) for score in scores]))
     scored.sort(key=lambda pair: pair[1], reverse=True)
-    return [candidate for candidate, _score in scored[:top_k]]
+    return [
+        replace(candidate, score=_relevance(raw)) for candidate, raw in scored[:top_k]
+    ]
+
+
+def _relevance(logit: float) -> float:
+    """Map a raw cross-encoder logit onto a probability in ``[0, 1]``."""
+    if logit >= 0:
+        probability = 1.0 / (1.0 + math.exp(-logit))
+    else:
+        exp = math.exp(logit)
+        probability = exp / (1.0 + exp)
+    return round(probability, 3)
 
 
 def reset_model_for_tests() -> None:

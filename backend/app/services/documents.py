@@ -7,6 +7,7 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.models.knowledge import Document, Folder
+from app.rag import vectordb
 from app.services.auth import can_access_folder, get_general_folder
 from app.services.errors import (
     DocumentNotFoundError,
@@ -134,6 +135,14 @@ def delete_document(db: Session, document: Document, uploads_dir: Path) -> Docum
     db.refresh(document)
 
     delete_stored_file(document.stored_filename, uploads_dir)
+    try:
+        vectordb.delete_document_vectors(vectordb.get_collection(), document.id)
+    except Exception:  # noqa: BLE001 - vector cleanup must never block deletion
+        logger.warning(
+            "documents.vector_delete_failed",
+            exc_info=True,
+            extra={"document_id": document.id},
+        )
     logger.info(
         "documents.deleted",
         extra={

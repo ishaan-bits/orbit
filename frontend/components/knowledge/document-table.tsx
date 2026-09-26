@@ -1,6 +1,6 @@
 "use client";
 
-import { FileText, FolderOpen, Loader2, Trash2 } from "lucide-react";
+import { Eye, FileText, FolderOpen, Loader2, Trash2 } from "lucide-react";
 
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -37,6 +37,34 @@ function DeleteButton({
       className="text-muted-foreground hover:text-destructive"
     >
       <Trash2 />
+    </Button>
+  );
+}
+
+function PreviewButton({
+  label,
+  documentId,
+}: {
+  label: string;
+  documentId: string;
+}) {
+  return (
+    <Button
+      variant="ghost"
+      size="icon-sm"
+      render={
+        <a
+          href={`/viewer/${documentId}`}
+          target="_blank"
+          rel="noopener noreferrer"
+          aria-label={`Preview ${label}`}
+          data-testid="preview-doc"
+        />
+      }
+      nativeButton={false}
+      className="text-muted-foreground hover:text-foreground"
+    >
+      <Eye />
     </Button>
   );
 }
@@ -175,10 +203,16 @@ export function DocumentTable({
                     <StatusBadge document={document} />
                   </TableCell>
                   <TableCell className="text-right">
-                    <DeleteButton
-                      label={document.original_filename}
-                      onClick={() => onDelete(document)}
-                    />
+                    <div className="flex items-center justify-end gap-1">
+                      <PreviewButton
+                        label={document.original_filename}
+                        documentId={document.id}
+                      />
+                      <DeleteButton
+                        label={document.original_filename}
+                        onClick={() => onDelete(document)}
+                      />
+                    </div>
                   </TableCell>
                 </TableRow>
               ))
@@ -217,10 +251,16 @@ export function DocumentTable({
                   {formatDate(document.created_at)} · {statusLabel(document)}
                 </p>
               </div>
-              <DeleteButton
-                label={document.original_filename}
-                onClick={() => onDelete(document)}
-              />
+              <div className="flex shrink-0 items-start gap-1">
+                <PreviewButton
+                  label={document.original_filename}
+                  documentId={document.id}
+                />
+                <DeleteButton
+                  label={document.original_filename}
+                  onClick={() => onDelete(document)}
+                />
+              </div>
             </div>
           ))
         )}

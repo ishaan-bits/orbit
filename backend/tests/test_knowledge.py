@@ -12,6 +12,7 @@ from app.db.base import Base
 from app.db.session import get_db
 from app.main import app
 from app.models.knowledge import Document
+from app.rag import vectordb
 from app.services.storage import get_uploads_dir
 
 
@@ -306,12 +307,23 @@ def test_get_unknown_document_returns_404(client: TestClient) -> None:
 
 
 def test_delete_document_soft_deletes_and_removes_file(
-    client: TestClient, db_session, uploads_dir: Path
+    client: TestClient,
+    db_session,
+    uploads_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     created = upload_file(
         client, "obsolete.txt", b"bye", content_type="text/plain"
     ).json()
     assert len(list(uploads_dir.iterdir())) == 1
+
+    vector_calls: list[str] = []
+    monkeypatch.setattr(vectordb, "get_collection", lambda: "test-collection")
+    monkeypatch.setattr(
+        vectordb,
+        "delete_document_vectors",
+        lambda _collection, doc_id: vector_calls.append(doc_id),
+    )
 
     response = client.delete(f"/api/documents/{created['id']}")
 
@@ -320,6 +332,9 @@ def test_delete_document_soft_deletes_and_removes_file(
 
     # physical file removed
     assert list(uploads_dir.iterdir()) == []
+
+    # chroma vectors for the document removed
+    assert vector_calls == [created["id"]]
 
     # soft-deleted row retained with a deletion timestamp
     row = db_session.get(Document, created["id"])
@@ -336,3 +351,60 @@ def test_delete_document_twice_returns_404(client: TestClient) -> None:
 
     assert client.delete(f"/api/documents/{created['id']}").status_code == 200
     assert client.delete(f"/api/documents/{created['id']}").status_code == 404
+
+
+# --- file streaming --------------------------------------------------------
+
+
+def test_file_endpoint_streams_original_bytes(client: TestClient) -> None:
+    payload = b"%PDF-1.4 orbit viewer content"
+    created = upload_file(client, "viewer.pdf", payload).json()
+
+    response = client.get(f"/api/documents/{created['id']}/file")
+
+    assert response.status_code == 200, response.text
+    assert response.headers["content-type"] == "application/pdf"
+    assert "attachment" in response.headers["content-disposition"]
+    assert "viewer.pdf" in response.headers["content-disposition"]
+    assert response.content == payload
+
+
+def test_file_endpoint_derives_mime_from_extension(client: TestClient) -> None:
+    created = upload_file(
+        client,
+        "report.pdf",
+        b"%PDF-1.4 generic",
+        content_type="application/octet-stream",
+    ).json()
+
+    response = client.get(f"/api/documents/{created['id']}/file")
+
+    assert response.status_code == 200
+    assert response.headers["content-type"] == "application/pdf"
+
+
+def test_file_endpoint_requires_auth(client: TestClient) -> None:
+    created = upload_file(client, "private.pdf").json()
+
+    client.cookies.clear()
+    response = client.get(f"/api/documents/{created['id']}/file")
+
+    assert response.status_code == 401
+
+
+def test_file_endpoint_returns_404_for_unknown_document(client: TestClient) -> None:
+    response = client.get("/api/documents/does-not-exist/file")
+    assert response.status_code == 404
+
+
+def test_file_endpoint_returns_404_when_stored_file_missing(
+    client: TestClient, db_session, uploads_dir: Path
+) -> None:
+    created = upload_file(client, "vanished.pdf").json()
+    row = db_session.get(Document, created["id"])
+    assert row is not None
+    (uploads_dir / row.stored_filename).unlink()
+
+    response = client.get(f"/api/documents/{created['id']}/file")
+
+    assert response.status_code == 404

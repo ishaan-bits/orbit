@@ -178,7 +178,7 @@ def ask(client: TestClient, query: str, conversation_id: Optional[str] = None):
 
 
 def test_query_returns_answer_and_sources(client: TestClient) -> None:
-    seed_text_document(
+    document = seed_text_document(
         client, "HR Handbook.txt", "Employees enjoy a vacation policy of twenty days."
     )
 
@@ -188,7 +188,14 @@ def test_query_returns_answer_and_sources(client: TestClient) -> None:
     payload = response.json()
     assert payload["answer"] == "**Hello** world"
     assert payload["conversation_id"]
-    assert payload["sources"] == [{"document": "HR Handbook.txt", "page": 1}]
+    assert payload["sources"] == [
+        {
+            "document": "HR Handbook.txt",
+            "page": 1,
+            "document_id": document["id"],
+            "score": 1.0,
+        }
+    ]
 
 
 def test_query_sources_reference_pdf_pages(client: TestClient) -> None:
@@ -202,8 +209,18 @@ def test_query_sources_reference_pdf_pages(client: TestClient) -> None:
 
     assert payload["answer"] == "**Hello** world"
     assert payload["sources"] == [
-        {"document": "Policies.pdf", "page": 1},
-        {"document": "Policies.pdf", "page": 2},
+        {
+            "document": "Policies.pdf",
+            "page": 1,
+            "document_id": document["id"],
+            "score": 1.0,
+        },
+        {
+            "document": "Policies.pdf",
+            "page": 2,
+            "document_id": document["id"],
+            "score": 1.0,
+        },
     ]
 
 
@@ -275,7 +292,9 @@ def test_query_generation_error_returns_502(client: TestClient, monkeypatch) -> 
 
 
 def test_query_stream_sends_sse_and_persists(client: TestClient) -> None:
-    seed_text_document(client, "faq.txt", "Frequently asked questions content.")
+    document = seed_text_document(
+        client, "faq.txt", "Frequently asked questions content."
+    )
 
     response = client.post(
         "/api/chat/query",
@@ -296,7 +315,14 @@ def test_query_stream_sends_sse_and_persists(client: TestClient) -> None:
     messages = history["conversations"][0]["messages"]
     assert [m["role"] for m in messages] == ["user", "assistant"]
     assert messages[1]["content"] == "**Hello** world"
-    assert messages[1]["sources"] == [{"document": "faq.txt", "page": 1}]
+    assert messages[1]["sources"] == [
+        {
+            "document": "faq.txt",
+            "page": 1,
+            "document_id": document["id"],
+            "score": 1.0,
+        }
+    ]
 
 
 def test_query_stream_without_documents_still_streams(
@@ -596,8 +622,18 @@ def test_persisted_sources_round_trip(client: TestClient) -> None:
     conversation = client.get("/api/chat/history").json()["conversations"][0]
     assistant = conversation["messages"][1]
     assert assistant["sources"] == [
-        {"document": "Round.pdf", "page": 1},
-        {"document": "Round.pdf", "page": 2},
+        {
+            "document": "Round.pdf",
+            "page": 1,
+            "document_id": document["id"],
+            "score": 1.0,
+        },
+        {
+            "document": "Round.pdf",
+            "page": 2,
+            "document_id": document["id"],
+            "score": 1.0,
+        },
     ]
     # JSON storage must be well-formed
     assert json.dumps(assistant["sources"])

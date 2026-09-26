@@ -4,7 +4,7 @@ import { useRef, useState } from "react";
 import { CheckCircle2, CloudUpload, Loader2, X } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
-import { ApiError, api } from "@/lib/api";
+import { api } from "@/lib/api";
 import { cn } from "cn";
 
 const ACCEPTED_EXTENSIONS = [".pdf", ".docx", ".txt", ".md"];
@@ -75,12 +75,16 @@ export function UploadZone({ folderId, disabled, onUploaded }: UploadZoneProps) 
 
       setItems((prev) => [...prev, { name: file.name, state: "uploading" }]);
       try {
-        await api.uploadDocument(file, folderId);
+        const doc = await api.uploadDocument(file, folderId);
+        const indexed = await api.indexDocument(doc.id);
+        if (indexed.status !== "indexed") {
+          throw new Error(indexed.error ?? "Indexing failed");
+        }
         uploaded += 1;
         setItems((prev) => updateLastUploading(prev, file.name, { state: "done" }));
       } catch (error) {
         const message =
-          error instanceof ApiError ? error.message : "Upload failed";
+          error instanceof Error ? error.message : "Upload failed";
         setItems((prev) =>
           updateLastUploading(prev, file.name, { state: "error", message }),
         );

@@ -29,6 +29,12 @@ class ChatQueryRequest(BaseModel):
 class ChatSource(BaseModel):
     document: str = Field(description="Source document filename")
     page: int = Field(description="Source page number")
+    document_id: Optional[str] = Field(
+        default=None, description="Document identifier, for the PDF viewer"
+    )
+    score: Optional[float] = Field(
+        default=None, description="Relevance probability in [0, 1], when scored"
+    )
 
 
 class ChatQueryResponse(BaseModel):

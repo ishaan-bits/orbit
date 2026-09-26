@@ -1,6 +1,6 @@
 import json
 from functools import lru_cache
-from typing import Any
+from typing import Any, Optional
 
 from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -26,8 +26,11 @@ class Settings(BaseSettings):
     jwt_expire_minutes: int = 1440
     cookie_secure: bool = False
 
-    # seed the NovaTech demo tenant (folders + accounts) on startup
-    seed_demo: bool = False
+    # NovaTech demo tenant (folders + accounts):
+    #   true  -> always seed (idempotent)
+    #   false -> never seed
+    #   unset -> seed only on first run (empty users table)
+    seed_demo: Optional[bool] = None
 
     cors_origins: list[str] = ["http://localhost:3000", "http://frontend:3000"]
 

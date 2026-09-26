@@ -4,6 +4,7 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from sqlalchemy import func, select
 
 from app.api.routes import (
     analytics,
@@ -17,8 +18,9 @@ from app.api.routes import (
 from app.core.config import settings
 from app.core.logging import setup_logging
 from app.db.session import SessionLocal
+from app.models.auth import User
 from app.services.auth import ensure_rbac_seed
-from app.services.demo_seed import ensure_demo_seed
+from app.services.demo_seed import ensure_demo_seed, should_seed_demo
 
 setup_logging(level="DEBUG" if settings.debug else "INFO")
 logger = logging.getLogger("orbit")
@@ -36,7 +38,7 @@ def _seed_rbac() -> None:
 
 
 def _seed_demo() -> None:
-    """Seed the NovaTech demo tenant when `SEED_DEMO=true` (idempotent)."""
+    """Seed the NovaTech demo tenant when enabled (idempotent)."""
     db = SessionLocal()
     try:
         ensure_demo_seed(db)
@@ -44,6 +46,21 @@ def _seed_demo() -> None:
         logger.exception("demo_seed.failed")
     finally:
         db.close()
+
+
+def _demo_seed_enabled() -> bool:
+    """Honor SEED_DEMO tri-state; when unset, seed only into an empty database."""
+    if settings.seed_demo is not None:
+        return settings.seed_demo
+    db = SessionLocal()
+    try:
+        user_count = db.scalar(select(func.count()).select_from(User)) or 0
+    except Exception:  # noqa: BLE001 - missing table means migrations not run
+        logger.exception("demo_seed.check_failed")
+        return False
+    finally:
+        db.close()
+    return should_seed_demo(None, user_count)
 
 
 @asynccontextmanager
@@ -57,7 +74,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         },
     )
     _seed_rbac()
-    if settings.seed_demo:
+    if _demo_seed_enabled():
         _seed_demo()
     yield
     logger.info("service.stopping", extra={"service": settings.app_name})

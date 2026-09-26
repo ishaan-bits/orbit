@@ -37,6 +37,13 @@ DEMO_USERS: list[tuple[str, str, str]] = [
 ]
 
 
+def should_seed_demo(setting: Optional[bool], user_count: int) -> bool:
+    """Tri-state SEED_DEMO: explicit True/False wins; unset seeds only first run."""
+    if setting is not None:
+        return setting
+    return user_count == 0
+
+
 def ensure_demo_seed(db: Session) -> dict[str, list[str]]:
     """Create demo folders and users if missing. Returns what was created."""
     ensure_rbac_seed(db)  # roles + the shared General folder

@@ -1,5 +1,7 @@
 # Orbit
 
+![Orbit banner](docs/banner.svg)
+
 **The enterprise AI knowledge workspace — hybrid retrieval, cited answers, and role-based access in one platform.**
 
 Orbit turns a company's documents into a secure, auditable AI workspace. Employees ask questions in natural language; Orbit retrieves the exact passages with hybrid search (BM25 + vectors + reranking), streams an answer token-by-token, and cites the source document and page for every claim. Permissions run all the way down into retrieval, so nobody sees an answer grounded in a document they cannot open.

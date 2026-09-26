@@ -6,6 +6,7 @@ import { useRouter } from "next/navigation";
 import { ArrowLeft, Loader2, Sparkles } from "lucide-react";
 
 import { useAuth } from "@/components/auth-provider";
+import { DemoWorkspace } from "@/components/login/demo-workspace";
 import { Button } from "@/components/ui/button";
 import {
   Card,
@@ -100,6 +101,7 @@ export default function LoginPage() {
                 placeholder="••••••••"
               />
             </div>
+            <DemoWorkspace onPickEmail={setEmail} />
             {error ? (
               <p
                 role="alert"

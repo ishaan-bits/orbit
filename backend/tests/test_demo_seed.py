@@ -16,6 +16,7 @@ from app.services.demo_seed import (
     DEMO_PASSWORD,
     DEMO_USERS,
     ensure_demo_seed,
+    should_seed_demo,
 )
 from app.services.errors import InvalidCredentialsError
 from app.services.storage import get_uploads_dir
@@ -144,3 +145,21 @@ def test_uploads_dir_setting_overrides_default(tmp_path, monkeypatch) -> None:
     monkeypatch.setattr(app_settings, "uploads_dir", str(custom))
     assert get_uploads_dir() == custom
     assert custom.is_dir()
+
+
+# --- seed gating (SEED_DEMO tri-state) --------------------------------------
+
+
+def test_should_seed_demo_true_when_explicitly_enabled() -> None:
+    assert should_seed_demo(True, 0) is True
+    assert should_seed_demo(True, 5) is True  # idempotent re-seed
+
+
+def test_should_seed_demo_false_when_disabled() -> None:
+    assert should_seed_demo(False, 0) is False
+    assert should_seed_demo(False, 5) is False
+
+
+def test_should_seed_demo_auto_seeds_only_empty_database() -> None:
+    assert should_seed_demo(None, 0) is True  # first run
+    assert should_seed_demo(None, 3) is False  # populated database

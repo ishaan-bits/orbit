@@ -31,6 +31,7 @@ export function FinalCTA() {
           <div className="mt-8 flex flex-col items-center justify-center gap-3 sm:flex-row">
             <Button
               render={<Link href="/login" />}
+              nativeButton={false}
               className="h-11 gap-2 px-6 text-base"
               data-testid="final-cta-demo"
             >
@@ -41,6 +42,7 @@ export function FinalCTA() {
               render={
                 <a href={GITHUB_URL} target="_blank" rel="noopener noreferrer" />
               }
+              nativeButton={false}
               variant="outline"
               className="h-11 gap-2 px-6 text-base"
             >

@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useState } from "react";
 import Link from "next/link";
-import { AlertTriangle, BarChart3, RefreshCw, ShieldAlert } from "lucide-react";
+import { AlertTriangle, RefreshCw, ShieldAlert } from "lucide-react";
 
 import { useAuth } from "@/components/auth-provider";
 import {
@@ -16,7 +16,6 @@ import { RecentSearchesTable } from "@/components/dashboard/recent-searches-tabl
 import { TopDocumentsChart } from "@/components/dashboard/top-documents-chart";
 import { TopQueriesList } from "@/components/dashboard/top-queries-list";
 import { RequireAuth } from "@/components/require-auth";
-import { UserMenu } from "@/components/user-menu";
 import { Button } from "@/components/ui/button";
 import {
   Card,
@@ -43,15 +42,15 @@ interface DashboardData {
   recent: AnalyticsRecent;
 }
 
-export default function DashboardPage() {
+export default function AnalyticsPage() {
   return (
     <RequireAuth>
-      <DashboardContent />
+      <AnalyticsContent />
     </RequireAuth>
   );
 }
 
-function DashboardContent() {
+function AnalyticsContent() {
   const { user } = useAuth();
   const isAdmin = user?.role === "Admin";
 
@@ -87,7 +86,7 @@ function DashboardContent() {
 
   if (!isAdmin) {
     return (
-      <main className="flex min-h-screen items-center justify-center px-4">
+      <main className="flex min-h-[calc(100vh-3.5rem)] items-center justify-center px-4">
         <Card className="w-full max-w-md" data-testid="admins-only">
           <CardHeader>
             <span className="mb-2 flex size-9 items-center justify-center rounded-lg bg-muted text-muted-foreground">
@@ -102,6 +101,7 @@ function DashboardContent() {
           <CardContent>
             <Button
               render={<Link href="/workspace" />}
+              nativeButton={false}
               variant="outline"
               className="w-full"
             >
@@ -114,40 +114,27 @@ function DashboardContent() {
   }
 
   return (
-    <main className="min-h-screen">
-      <header className="border-b border-border">
-        <div className="mx-auto flex max-w-6xl flex-wrap items-center justify-between gap-4 px-4 py-6 sm:px-6 lg:px-8">
-          <div className="flex items-center gap-3">
-            <span className="flex size-10 items-center justify-center rounded-lg bg-primary text-primary-foreground">
-              <BarChart3 className="size-5" />
-            </span>
-            <div>
-              <h1 className="text-xl font-semibold tracking-tight">
-                Analytics
-              </h1>
-              <p className="text-sm text-muted-foreground">
-                Enterprise insights across AI queries
-              </p>
-            </div>
-          </div>
-          <div className="flex items-center gap-2">
-            {data && !loading && !error ? (
-              <Button
-                variant="outline"
-                size="sm"
-                onClick={() => void load()}
-                disabled={loading}
-              >
-                <RefreshCw />
-                Refresh
-              </Button>
-            ) : null}
-            <UserMenu />
-          </div>
-        </div>
-      </header>
-
+    <main>
       <div className="mx-auto flex max-w-6xl flex-col gap-4 px-4 py-6 sm:px-6 lg:px-8">
+        <div className="flex items-center justify-between gap-3">
+          <div>
+            <h1 className="text-xl font-semibold tracking-tight">Analytics</h1>
+            <p className="text-sm text-muted-foreground">
+              Enterprise insights across AI queries
+            </p>
+          </div>
+          {data && !loading && !error ? (
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => void load()}
+              disabled={loading}
+            >
+              <RefreshCw />
+              Refresh
+            </Button>
+          ) : null}
+        </div>
         {loading && !data ? (
           <DashboardSkeleton />
         ) : error ? (

@@ -52,12 +52,17 @@ export function Navbar() {
         <div className="hidden items-center gap-2 md:flex">
           <Button
             render={<Link href="/login" />}
+            nativeButton={false}
             variant="ghost"
             data-testid="nav-signin"
           >
             Sign in
           </Button>
-          <Button render={<Link href="/login" />} data-testid="nav-cta-demo">
+          <Button
+            render={<Link href="/login" />}
+            nativeButton={false}
+            data-testid="nav-cta-demo"
+          >
             Try Live Demo
           </Button>
         </div>
@@ -94,12 +99,17 @@ export function Navbar() {
           <div className="mt-3 flex gap-2">
             <Button
               render={<Link href="/login" />}
+              nativeButton={false}
               variant="outline"
               className="flex-1"
             >
               Sign in
             </Button>
-            <Button render={<Link href="/login" />} className="flex-1">
+            <Button
+              render={<Link href="/login" />}
+              nativeButton={false}
+              className="flex-1"
+            >
               Try Live Demo
             </Button>
           </div>

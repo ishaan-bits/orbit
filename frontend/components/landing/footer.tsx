@@ -9,7 +9,7 @@ const COLUMNS = [
     links: [
       { href: "/workspace", label: "AI Workspace" },
       { href: "/knowledge", label: "Knowledge Base" },
-      { href: "/dashboard", label: "Analytics" },
+      { href: "/analytics", label: "Analytics" },
       { href: "/login", label: "Sign in" },
     ],
   },

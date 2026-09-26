@@ -9,7 +9,6 @@ import { EmptyState } from "@/components/knowledge/empty-state";
 import { FolderSidebar } from "@/components/knowledge/folder-sidebar";
 import { UploadZone } from "@/components/knowledge/upload-zone";
 import { RequireAuth } from "@/components/require-auth";
-import { UserMenu } from "@/components/user-menu";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { api, type DocumentMeta, type Folder } from "@/lib/api";
@@ -105,8 +104,8 @@ function KnowledgeContent() {
       : "folder";
 
   return (
-    <div className="min-h-screen">
-      <header className="border-b border-border">
+    <div className="min-h-full">
+      <header>
         <div className="mx-auto flex max-w-6xl flex-col gap-4 px-4 py-6 sm:px-6 md:flex-row md:items-center md:justify-between lg:px-8">
           <div className="flex items-center gap-3">
             <span className="flex size-10 items-center justify-center rounded-lg bg-primary text-primary-foreground">
@@ -121,18 +120,15 @@ function KnowledgeContent() {
               </p>
             </div>
           </div>
-          <div className="flex w-full flex-col gap-4 md:w-auto md:flex-row md:items-center">
-            <div className="relative w-full md:w-72">
-              <Search className="absolute top-1/2 left-3 size-4 -translate-y-1/2 text-muted-foreground" />
-              <Input
-                value={query}
-                onChange={(event) => setQuery(event.target.value)}
-                placeholder="Search documents…"
-                aria-label="Search documents"
-                className="pl-9"
-              />
-            </div>
-            <UserMenu />
+          <div className="relative w-full md:w-72">
+            <Search className="absolute top-1/2 left-3 size-4 -translate-y-1/2 text-muted-foreground" />
+            <Input
+              value={query}
+              onChange={(event) => setQuery(event.target.value)}
+              placeholder="Search documents…"
+              aria-label="Search documents"
+              className="pl-9"
+            />
           </div>
         </div>
       </header>

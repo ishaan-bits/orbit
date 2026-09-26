@@ -9,6 +9,8 @@ export default function WorkspaceLayout({
   children,
 }: Readonly<{ children: React.ReactNode }>) {
   return (
-    <div className="flex h-screen flex-col overflow-hidden">{children}</div>
+    <div className="flex h-[calc(100vh-3.5rem)] flex-col overflow-hidden">
+      {children}
+    </div>
   );
 }

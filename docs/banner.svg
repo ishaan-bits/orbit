@@ -1,0 +1,45 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="320" viewBox="0 0 1200 320" role="img" aria-label="Orbit — Enterprise Knowledge Operating System">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#09090B"/>
+      <stop offset="55%" stop-color="#0E0E14"/>
+      <stop offset="100%" stop-color="#13111F"/>
+    </linearGradient>
+    <radialGradient id="glow" cx="50%" cy="0%" r="80%">
+      <stop offset="0%" stop-color="#6366F1" stop-opacity="0.35"/>
+      <stop offset="60%" stop-color="#6366F1" stop-opacity="0.06"/>
+      <stop offset="100%" stop-color="#6366F1" stop-opacity="0"/>
+    </radialGradient>
+    <pattern id="grid" width="40" height="40" patternUnits="userSpaceOnUse">
+      <path d="M 40 0 L 0 0 0 40" fill="none" stroke="#FFFFFF" stroke-opacity="0.05" stroke-width="1"/>
+    </pattern>
+    <linearGradient id="ring" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#818CF8"/>
+      <stop offset="100%" stop-color="#6366F1"/>
+    </linearGradient>
+  </defs>
+
+  <rect width="1200" height="320" fill="url(#bg)"/>
+  <rect width="1200" height="320" fill="url(#grid)"/>
+  <rect width="1200" height="320" fill="url(#glow)"/>
+
+  <g transform="translate(120 160)">
+    <circle cx="0" cy="0" r="52" fill="none" stroke="url(#ring)" stroke-width="16"/>
+    <circle cx="0" cy="-52" r="13" fill="#A5B4FC"/>
+    <ellipse cx="0" cy="0" rx="92" ry="30" fill="none" stroke="#6366F1" stroke-opacity="0.45" stroke-width="5" transform="rotate(-24)"/>
+  </g>
+
+  <text x="250" y="150" font-family="'Geist Sans','Inter',Helvetica,Arial,sans-serif" font-size="76" font-weight="700" fill="#FAFAFA" letter-spacing="-2">Orbit</text>
+  <text x="254" y="196" font-family="'Geist Sans','Inter',Helvetica,Arial,sans-serif" font-size="26" font-weight="500" fill="#A1A1AA" letter-spacing="0.5">Enterprise Knowledge Operating System</text>
+  <rect x="254" y="224" width="430" height="2" rx="1" fill="url(#ring)"/>
+  <text x="254" y="256" font-family="'Geist Mono',ui-monospace,Menlo,monospace" font-size="18" fill="#6366F1" letter-spacing="1">hybrid retrieval · cited answers · RBAC · analytics</text>
+
+  <g font-family="'Geist Mono',ui-monospace,Menlo,monospace" font-size="15" fill="#71717A">
+    <rect x="940" y="96"  width="150" height="34" rx="17" fill="#18181B" stroke="#27272A"/>
+    <text x="1015" y="118" text-anchor="middle" fill="#A1A1AA">FastAPI</text>
+    <rect x="970" y="142" width="150" height="34" rx="17" fill="#18181B" stroke="#27272A"/>
+    <text x="1045" y="164" text-anchor="middle" fill="#A1A1AA">Next.js 15</text>
+    <rect x="940" y="188" width="150" height="34" rx="17" fill="#18181B" stroke="#27272A"/>
+    <text x="1015" y="210" text-anchor="middle" fill="#A1A1AA">ChromaDB</text>
+  </g>
+</svg>

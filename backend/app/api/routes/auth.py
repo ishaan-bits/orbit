@@ -22,13 +22,26 @@ router = APIRouter(tags=["auth"])
 logger = logging.getLogger("orbit.api.auth")
 
 
+def _session_cookie_samesite() -> str:
+    """SameSite policy for the session cookie.
+
+    In production (`COOKIE_SECURE=true`, HTTPS) the API may be consumed from
+    a different site than the page (direct mode via `NEXT_PUBLIC_API_URL`),
+    where browsers neither store nor send a `Lax` cookie — that surfaced as
+    "Not authenticated" right after a successful login. `None` (which legally
+    requires `Secure`) works for both cross-site and same-origin proxy modes.
+    Local HTTP development keeps `Lax`.
+    """
+    return "none" if settings.cookie_secure else "lax"
+
+
 def _set_session_cookie(response: Response, token: str) -> None:
     response.set_cookie(
         key=SESSION_COOKIE,
         value=token,
         max_age=settings.jwt_expire_minutes * 60,
         httponly=True,
-        samesite="lax",
+        samesite=_session_cookie_samesite(),
         secure=settings.cookie_secure,
         path="/",
     )
@@ -39,7 +52,7 @@ def _clear_session_cookie(response: Response) -> None:
         key=SESSION_COOKIE,
         path="/",
         httponly=True,
-        samesite="lax",
+        samesite=_session_cookie_samesite(),
         secure=settings.cookie_secure,
     )
 

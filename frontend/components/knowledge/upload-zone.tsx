@@ -77,6 +77,15 @@ export function UploadZone({ folderId, disabled, onUploaded }: UploadZoneProps) 
       try {
         const doc = await api.uploadDocument(file, folderId);
         const indexed = await api.indexDocument(doc.id);
+        if (indexed.status === "pending_retry") {
+          // HTTP 429 quota: file + metadata preserved, re-index later
+          // without re-uploading — not an upload failure.
+          uploaded += 1;
+          setItems((prev) =>
+            updateLastUploading(prev, file.name, { state: "done" }),
+          );
+          continue;
+        }
         if (indexed.status !== "indexed") {
           throw new Error(indexed.error ?? "Indexing failed");
         }

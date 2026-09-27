@@ -1,4 +1,5 @@
 import io
+import json
 import logging
 import math
 import uuid
@@ -767,3 +768,264 @@ def test_upsert_chunks_repairs_dimension_mismatch(chroma_dir: Path) -> None:
     fresh = vectordb.get_collection()
     assert vectordb.count_document_vectors(fresh, "doc-b") == 1
     assert vectordb.count_document_vectors(fresh, "doc-a") == 0
+
+
+# --- 429 quota backoff + pending retry --------------------------------------
+
+_QUOTA_BODY = json.dumps(
+    {
+        "error": {
+            "code": 429,
+            "message": (
+                "You exceeded your current quota, please check your plan "
+                "and billing details."
+            ),
+            "details": [
+                {
+                    "@type": "type.googleapis.com/google.rpc.QuotaFailure",
+                    "violations": [
+                        {
+                            "quotaMetric": "generate_content_free_tier_requests",
+                            "quotaValue": "1500",
+                        }
+                    ],
+                },
+                {
+                    "@type": "type.googleapis.com/google.rpc.RetryInfo",
+                    "retryDelay": "37s",
+                },
+            ],
+        }
+    }
+)
+
+
+class _FakeGeminiResponse:
+    def __init__(self, status_code: int, json_body=None, text: str = "") -> None:
+        self.status_code = status_code
+        self._json_body = json_body
+        self.text = text
+
+    def json(self):
+        return self._json_body
+
+
+def _fake_gemini_client(responses, calls: list):
+    class _Client:
+        def __init__(self, *args, **kwargs) -> None:
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc) -> bool:
+            return False
+
+        def post(self, url, json=None, headers=None):
+            calls.append(url)
+            return responses[len(calls) - 1]
+
+    return _Client
+
+
+def test_post_gemini_retries_429_with_exponential_backoff(monkeypatch) -> None:
+    from app.rag import embedder as embedder_module
+
+    calls: list = []
+    slept: list = []
+    responses = [
+        _FakeGeminiResponse(429, text=_QUOTA_BODY),
+        _FakeGeminiResponse(429, text=_QUOTA_BODY),
+        _FakeGeminiResponse(200, json_body={"embeddings": [{"values": [0.5, 1.0]}]}),
+    ]
+    monkeypatch.setattr(
+        embedder_module.httpx, "Client", _fake_gemini_client(responses, calls)
+    )
+    monkeypatch.setattr(embedder_module, "_backoff_sleep", lambda s: slept.append(s))
+    monkeypatch.setattr(app_settings, "gemini_api_key", "unit-test-key")
+
+    vectors = embedder_module._post_gemini_embeddings(["hello"])
+
+    assert vectors == [[0.5, 1.0]]
+    assert slept == [1.0, 2.0]
+    assert len(calls) == 3
+
+
+def test_post_gemini_raises_quota_error_after_max_retries(
+    monkeypatch, caplog
+) -> None:
+    from app.rag import embedder as embedder_module
+
+    calls: list = []
+    slept: list = []
+    responses = [_FakeGeminiResponse(429, text=_QUOTA_BODY) for _ in range(6)]
+    monkeypatch.setattr(
+        embedder_module.httpx, "Client", _fake_gemini_client(responses, calls)
+    )
+    monkeypatch.setattr(embedder_module, "_backoff_sleep", lambda s: slept.append(s))
+    monkeypatch.setattr(app_settings, "gemini_api_key", "unit-test-key")
+
+    with caplog.at_level(logging.WARNING, logger="orbit.rag.embedder"):
+        with pytest.raises(embedder_module.EmbeddingQuotaError) as excinfo:
+            embedder_module._post_gemini_embeddings(["hello"])
+
+    # 1 initial attempt + max 5 retries, exponential 1s, 2s, 4s, 8s, 16s
+    assert slept == [1.0, 2.0, 4.0, 8.0, 16.0]
+    assert len(calls) == 6
+
+    error = excinfo.value
+    assert error.body == _QUOTA_BODY
+    assert error.retry_delay == "37s"
+
+    # the complete 429 body (quota metric + retryDelay) is logged every time
+    backoffs = [
+        r
+        for r in caplog.records
+        if getattr(r, "msg", "") == "embedder.gemini_429_backoff"
+    ]
+    assert len(backoffs) == 5
+    assert all(r.body == _QUOTA_BODY for r in backoffs)
+    assert all(r.retry_delay == "37s" for r in backoffs)
+    exhausted = [
+        r
+        for r in caplog.records
+        if getattr(r, "msg", "") == "embedder.gemini_429_exhausted"
+    ]
+    assert len(exhausted) == 1
+    assert exhausted[0].body == _QUOTA_BODY
+
+
+def test_post_gemini_does_not_retry_non_429(monkeypatch) -> None:
+    from app.rag import embedder as embedder_module
+
+    calls: list = []
+    slept: list = []
+    responses = [_FakeGeminiResponse(500, text="internal boom")]
+    monkeypatch.setattr(
+        embedder_module.httpx, "Client", _fake_gemini_client(responses, calls)
+    )
+    monkeypatch.setattr(embedder_module, "_backoff_sleep", lambda s: slept.append(s))
+    monkeypatch.setattr(app_settings, "gemini_api_key", "unit-test-key")
+
+    with pytest.raises(embedder_module.EmbeddingProviderError, match="HTTP 500"):
+        embedder_module._post_gemini_embeddings(["hello"])
+
+    assert slept == []
+    assert len(calls) == 1
+
+
+def test_encode_texts_quota_error_never_falls_back(monkeypatch) -> None:
+    from app.rag import embedder as embedder_module
+
+    def _quota(_chunk):
+        raise embedder_module.EmbeddingQuotaError(
+            "quota exceeded", body=_QUOTA_BODY, retry_delay="37s"
+        )
+
+    local_calls: list = []
+    monkeypatch.setattr(app_settings, "embedding_provider", "gemini")
+    monkeypatch.setattr(embedder_module, "_post_gemini_embeddings", _quota)
+    monkeypatch.setattr(
+        embedder_module, "_encode_local", lambda t: local_calls.append(t)
+    )
+
+    with pytest.raises(embedder_module.EmbeddingQuotaError):
+        embedder_module.encode_texts(["a"])
+
+    assert local_calls == []
+
+
+def test_index_document_service_parks_pending_retry_on_quota(
+    db_session, uploads_dir: Path, chroma_dir: Path, monkeypatch
+) -> None:
+    from app.rag.indexer import index_document as run_indexing
+
+    def _quota(_texts):
+        raise embedder.EmbeddingQuotaError(
+            "quota exceeded", body=_QUOTA_BODY, retry_delay="37s"
+        )
+
+    monkeypatch.setattr(embedder, "encode_texts", _quota)
+    content = b"content that must survive the quota park"
+    document = _seed_document(db_session, uploads_dir, "parked.txt", content)
+
+    result = run_indexing(db_session, document, uploads_dir)
+
+    assert result.status == DocumentStatus.PENDING_RETRY
+    assert result.error is None
+    assert result.chunk_count == 0
+
+    db_session.refresh(document)
+    assert document.status == DocumentStatus.PENDING_RETRY
+    assert document.index_error is None
+    assert document.chunk_count == 0
+    # file + metadata preserved for a later retry (no re-upload)
+    assert (uploads_dir / document.stored_filename).read_bytes() == content
+    assert document.original_filename == "parked.txt"
+    rows = db_session.scalars(
+        select(DocumentChunk).where(DocumentChunk.document_id == document.id)
+    ).all()
+    assert rows == []
+
+
+def test_index_endpoint_returns_202_pending_retry(
+    client: TestClient, monkeypatch
+) -> None:
+    def _quota(_texts):
+        raise embedder.EmbeddingQuotaError(
+            "quota exceeded", body=_QUOTA_BODY, retry_delay="37s"
+        )
+
+    monkeypatch.setattr(embedder, "encode_texts", _quota)
+    document = upload_file(client, "parked-api.txt", b"content to park for retry")
+
+    response = client.post(f"/api/documents/{document['id']}/index")
+
+    assert response.status_code == 202, response.text
+    payload = response.json()
+    assert payload["status"] == "pending_retry"
+    assert payload["error"] is None
+
+    fetched = client.get(f"/api/documents/{document['id']}").json()
+    assert fetched["status"] == "pending_retry"
+    assert fetched["index_error"] is None
+    assert fetched["original_filename"] == "parked-api.txt"
+    file_response = client.get(f"/api/documents/{document['id']}/file")
+    assert file_response.status_code == 200
+
+
+def test_retry_pending_endpoint_reindexes_without_upload(
+    client: TestClient, db_session, monkeypatch
+) -> None:
+    from app.api.routes import documents as documents_routes
+
+    def _quota(_texts):
+        raise embedder.EmbeddingQuotaError(
+            "quota exceeded", body=_QUOTA_BODY, retry_delay="37s"
+        )
+
+    monkeypatch.setattr(embedder, "encode_texts", _quota)
+    document = upload_file(client, "retry-later.txt", b"retry me later on demand")
+    parked = client.post(f"/api/documents/{document['id']}/index")
+    assert parked.status_code == 202, parked.text
+
+    # quota clears: restore the fake embedder and point the background
+    # job's fresh session at the test database
+    monkeypatch.setattr(
+        embedder,
+        "encode_texts",
+        lambda texts: [[float(len(t)), 1.0, 2.0] for t in texts],
+    )
+    monkeypatch.setattr(documents_routes, "SessionLocal", lambda: db_session)
+
+    response = client.post("/api/documents/retry-pending")
+
+    assert response.status_code == 202, response.text
+    body = response.json()
+    assert body["status"] == "pending_retry"
+    assert body["queued"] == 1
+    assert body["document_ids"] == [document["id"]]
+
+    fetched = client.get(f"/api/documents/{document['id']}").json()
+    assert fetched["status"] == "indexed"
+    assert fetched["chunk_count"] >= 1

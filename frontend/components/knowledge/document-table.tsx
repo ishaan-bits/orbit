@@ -79,6 +79,8 @@ function statusLabel(document: DocumentMeta): string {
       return "Indexing…";
     case "failed":
       return "Indexing failed";
+    case "pending_retry":
+      return "Pending retry";
     default:
       return "Not indexed";
   }
@@ -106,6 +108,17 @@ function StatusBadge({ document }: { document: DocumentMeta }) {
     return (
       <Badge variant="destructive" title={document.index_error ?? undefined}>
         Indexing failed
+      </Badge>
+    );
+  }
+  if (document.status === "pending_retry") {
+    return (
+      <Badge
+        variant="outline"
+        className="border-amber-500/30 bg-amber-500/10 text-amber-600 dark:text-amber-400"
+        title="Embedding quota reached — will be re-indexed on retry"
+      >
+        Pending retry
       </Badge>
     );
   }

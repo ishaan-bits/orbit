@@ -6,7 +6,10 @@
   loading torch would push the 512MB instance over its limit. On failure it
   falls back to the local model only when ``embedding_fallback == "local"``
   (the dev default); production sets ``EMBEDDING_FALLBACK=none`` so the
-  error surfaces instead of OOM-crashing the process.
+  error surfaces instead of OOM-crashing the process. HTTP 429 quota
+  responses are retried with exponential backoff (1s..16s, max 5 retries)
+  and never fall back; exhaustion raises :class:`EmbeddingQuotaError` so
+  the document can be parked as ``pending_retry``.
 * ``local``   -- ``BAAI/bge-small-en-v1.5`` via SentenceTransformers, a
   process-wide singleton loaded on first use (the default everywhere).
 
@@ -15,9 +18,11 @@ L2-normalizable vector per input text, embedded in batches of at most
 :data:`INDEX_EMBED_BATCH_SIZE` inputs.
 """
 
+import json
 import logging
 import os
 import threading
+import time
 
 import httpx
 
@@ -31,6 +36,12 @@ GEMINI_OUTPUT_DIM = 768
 GEMINI_TIMEOUT = 30.0
 # Maximum texts sent to the embedding backend per request (<=16 per spec).
 INDEX_EMBED_BATCH_SIZE = 16
+
+# HTTP 429 quota handling: exponential backoff, max 5 retries per request.
+# A quota breach is a runtime condition (plan/billing), never a reason to
+# load the local model or lose the uploaded document.
+GEMINI_429_MAX_RETRIES = 5
+GEMINI_429_BACKOFF_SECONDS = (1.0, 2.0, 4.0, 8.0, 16.0)
 
 # Keep torch's CPU pools small: Render's 512MB instance cannot afford
 # default OpenMP/MKL thread arenas (overridable via environment).
@@ -47,6 +58,19 @@ class EmbeddingProviderError(Exception):
     """The remote embedding provider rejected or failed a request."""
 
 
+class EmbeddingQuotaError(EmbeddingProviderError):
+    """Gemini answered HTTP 429 even after all backoff retries.
+
+    Carries the complete response body (quota metric) and the RetryInfo
+    ``retryDelay`` hint so operators can see exactly which quota tripped.
+    """
+
+    def __init__(self, message: str, body: str = "", retry_delay: str = "") -> None:
+        super().__init__(message)
+        self.body = body
+        self.retry_delay = retry_delay
+
+
 def encode_texts(texts: list[str]) -> list[list[float]]:
     """Embed texts, returning one vector per input (batched, <=16/request)."""
     if not texts:
@@ -54,6 +78,10 @@ def encode_texts(texts: list[str]) -> list[list[float]]:
     if settings.embedding_provider == "gemini":
         try:
             return _encode_gemini(texts)
+        except EmbeddingQuotaError:
+            # A 429 is a runtime condition: propagate it everywhere so the
+            # indexer can park the document as pending_retry (never torch).
+            raise
         except Exception as exc:  # noqa: BLE001 - availability over failure
             if not _local_fallback_allowed():
                 logger.error(
@@ -123,30 +151,86 @@ def _post_gemini_embeddings(chunk: list[str]) -> list[list[float]]:
         "x-goog-api-key": settings.gemini_api_key,
         "Content-Type": "application/json",
     }
+
+    for attempt in range(GEMINI_429_MAX_RETRIES + 1):
+        try:
+            with httpx.Client(timeout=GEMINI_TIMEOUT) as client:
+                response = client.post(url, json=payload, headers=headers)
+        except httpx.HTTPError as exc:
+            raise EmbeddingProviderError(
+                f"Gemini embedding request failed: {exc}"
+            ) from exc
+
+        if response.status_code == 429:
+            body = response.text
+            retry_delay = _parse_retry_delay(body)
+            if attempt >= GEMINI_429_MAX_RETRIES:
+                logger.error(
+                    "embedder.gemini_429_exhausted",
+                    extra={
+                        "attempts": attempt + 1,
+                        "retry_delay": retry_delay,
+                        "body": body,
+                    },
+                )
+                raise EmbeddingQuotaError(
+                    "Gemini embedding quota exceeded after "
+                    f"{GEMINI_429_MAX_RETRIES} backoff retries",
+                    body=body,
+                    retry_delay=retry_delay,
+                )
+            sleep_seconds = GEMINI_429_BACKOFF_SECONDS[attempt]
+            logger.warning(
+                "embedder.gemini_429_backoff",
+                extra={
+                    "attempt": attempt + 1,
+                    "sleep_seconds": sleep_seconds,
+                    "retry_delay": retry_delay,
+                    "body": body,
+                },
+            )
+            _backoff_sleep(sleep_seconds)
+            continue
+
+        if response.status_code != 200:
+            raise EmbeddingProviderError(
+                f"Gemini embedding failed with HTTP {response.status_code}: "
+                f"{response.text[:200]}"
+            )
+
+        data = response.json()
+        values = [
+            item.get("values") or []
+            for item in data.get("embeddings", [])
+        ]
+        if len(values) != len(chunk) or any(not row for row in values):
+            raise EmbeddingProviderError(
+                f"Gemini returned {len(values)} embeddings for {len(chunk)} texts"
+            )
+        return values
+
+    raise EmbeddingProviderError(  # pragma: no cover - loop always returns
+        "Gemini embedding retries exhausted"
+    )
+
+
+def _backoff_sleep(seconds: float) -> None:
+    """Pause between 429 retries (seamless to stub out in tests)."""
+    time.sleep(seconds)
+
+
+def _parse_retry_delay(body: str) -> str:
+    """Extract the RetryInfo ``retryDelay`` hint from a Google error body."""
     try:
-        with httpx.Client(timeout=GEMINI_TIMEOUT) as client:
-            response = client.post(url, json=payload, headers=headers)
-    except httpx.HTTPError as exc:
-        raise EmbeddingProviderError(
-            f"Gemini embedding request failed: {exc}"
-        ) from exc
-
-    if response.status_code != 200:
-        raise EmbeddingProviderError(
-            f"Gemini embedding failed with HTTP {response.status_code}: "
-            f"{response.text[:200]}"
-        )
-
-    data = response.json()
-    values = [
-        item.get("values") or []
-        for item in data.get("embeddings", [])
-    ]
-    if len(values) != len(chunk) or any(not row for row in values):
-        raise EmbeddingProviderError(
-            f"Gemini returned {len(values)} embeddings for {len(chunk)} texts"
-        )
-    return values
+        details = json.loads(body).get("error", {}).get("details", []) or []
+    except (ValueError, AttributeError, TypeError):
+        return ""
+    for detail in details:
+        if isinstance(detail, dict) and str(detail.get("@type", "")).endswith(
+            "RetryInfo"
+        ):
+            return str(detail.get("retryDelay", ""))
+    return ""
 
 
 def get_model():

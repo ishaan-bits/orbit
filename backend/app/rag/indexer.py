@@ -124,6 +124,21 @@ def index_document(
         db.refresh(document)
         progress = PROGRESS_STORED
         peak = max(peak, log_rss("completed"))
+    except embedder.EmbeddingQuotaError as exc:
+        # HTTP 429 quota (runtime condition): park for a background retry
+        # instead of failing — the PDF and its metadata stay untouched.
+        peak = max(peak, rss_mb())
+        logger.warning(
+            "rag.indexing.pending_retry",
+            extra={
+                "document_id": document.id,
+                "progress": progress,
+                "peak_rss_mb": peak,
+                "retry_delay": exc.retry_delay,
+                "quota_body": exc.body,
+            },
+        )
+        return _mark_pending_retry(db, document, progress, peak)
     except Exception as exc:  # noqa: BLE001 - graceful failure is the contract
         peak = max(peak, rss_mb())
         logger.error(
@@ -198,6 +213,55 @@ def _flush_batch(
 
     del texts, vectors  # release batch references before the gc pass
     log_rss("embeddings_written")
+
+
+def _mark_pending_retry(
+    db: Session,
+    document: Document,
+    progress: int,
+    peak: int,
+) -> IndexingResult:
+    """Park a quota-blocked document for a later background retry.
+
+    The uploaded file and its SQLite metadata are preserved (requirement:
+    retry without re-uploading); only partial chunks/vectors are rolled
+    back so the next attempt starts clean. Never raises.
+    """
+    db.rollback()
+    try:
+        db.execute(
+            sql_delete(DocumentChunk).where(DocumentChunk.document_id == document.id)
+        )
+        document.status = DocumentStatus.PENDING_RETRY
+        document.chunk_count = 0
+        document.index_error = None
+        db.add(document)
+        db.commit()
+        db.refresh(document)
+    except Exception:  # noqa: BLE001 - last-resort cleanup
+        logger.exception(
+            "rag.indexing.pending_retry_cleanup_failed",
+            extra={"document_id": document.id},
+        )
+        db.rollback()
+
+    try:
+        vectordb.delete_document_vectors(vectordb.get_collection(), document.id)
+    except Exception:  # noqa: BLE001 - best-effort vector cleanup
+        logger.warning(
+            "rag.indexing.vector_cleanup_failed",
+            extra={"document_id": document.id},
+            exc_info=True,
+        )
+
+    return IndexingResult(
+        document_id=document.id,
+        status=DocumentStatus.PENDING_RETRY,
+        progress=progress,
+        chunk_count=0,
+        error=None,
+        peak_rss_mb=peak,
+    )
 
 
 def _mark_failed(

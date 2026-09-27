@@ -16,7 +16,12 @@ export interface Folder {
   created_at: string;
 }
 
-export type DocumentStatus = "uploaded" | "processing" | "indexed" | "failed";
+export type DocumentStatus =
+  | "uploaded"
+  | "processing"
+  | "indexed"
+  | "failed"
+  | "pending_retry";
 
 export interface DocumentMeta {
   id: string;

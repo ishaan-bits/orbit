@@ -1,10 +1,11 @@
 import logging
 import mimetypes
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Union
 
 from fastapi import (
     APIRouter,
+    BackgroundTasks,
     Depends,
     File,
     Form,
@@ -13,12 +14,13 @@ from fastapi import (
     UploadFile,
     status,
 )
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, JSONResponse
 from sqlalchemy.orm import Session
 
 from app.api.deps import get_current_user
-from app.db.session import get_db
+from app.db.session import SessionLocal, get_db
 from app.models.auth import User
+from app.models.knowledge import Document, DocumentStatus
 from app.rag import indexer as indexer_service
 from app.schemas.knowledge import (
     DocumentDeleteResponse,
@@ -208,6 +210,63 @@ def delete_document(
     return DocumentDeleteResponse(id=document_id, status="deleted")
 
 
+def _reindex_document_background(document_id: str, uploads_dir: Path) -> None:
+    """Re-run indexing for one parked document in a fresh DB session.
+
+    Runs via BackgroundTasks after the 202 response is sent, so pending
+    documents are re-indexed in place — no re-upload needed.
+    """
+    db = SessionLocal()
+    try:
+        document = db.get(Document, document_id)
+        if document is None or document.deleted_at is not None:
+            return
+        indexer_service.index_document(db, document, uploads_dir)
+    except Exception:  # noqa: BLE001 - background jobs must not crash the app
+        logger.exception(
+            "documents.retry_background_failed",
+            extra={"document_id": document_id},
+        )
+    finally:
+        db.close()
+
+
+@router.post(
+    "/documents/retry-pending",
+    status_code=status.HTTP_202_ACCEPTED,
+)
+def retry_pending_documents(
+    background_tasks: BackgroundTasks,
+    db: Session = Depends(get_db),
+    uploads_dir: Path = Depends(get_uploads_dir),
+    user: User = Depends(get_current_user),
+) -> JSONResponse:
+    """Queue background re-indexing for every ``pending_retry`` document.
+
+    Used after a Gemini 429 quota burst: files and metadata were preserved
+    by the indexer, so documents are re-indexed in place. Answers 202
+    immediately; the work happens in the background.
+    """
+    items, _total = documents_service.list_documents(
+        db, limit=500, accessible_ids=_accessible_ids(db, user)
+    )
+    pending_ids = [
+        item.id for item in items if item.status == DocumentStatus.PENDING_RETRY
+    ]
+    for document_id in pending_ids:
+        background_tasks.add_task(
+            _reindex_document_background, document_id, uploads_dir
+        )
+    return JSONResponse(
+        status_code=status.HTTP_202_ACCEPTED,
+        content={
+            "status": DocumentStatus.PENDING_RETRY,
+            "queued": len(pending_ids),
+            "document_ids": pending_ids,
+        },
+    )
+
+
 @router.post(
     "/documents/{document_id}/index",
     response_model=IndexDocumentResponse,
@@ -217,8 +276,15 @@ def index_document(
     db: Session = Depends(get_db),
     uploads_dir: Path = Depends(get_uploads_dir),
     user: User = Depends(get_current_user),
-) -> IndexDocumentResponse:
-    """Run the indexing pipeline (parse, chunk, embed, store) for a document."""
+) -> Union[IndexDocumentResponse, JSONResponse]:
+    """Run the indexing pipeline (parse, chunk, embed, store) for a document.
+
+    Answers 200 with the final status. When the embedding quota (HTTP 429)
+    is exhausted even after backoff, answers **202** with
+    ``{"status": "pending_retry"}`` — the PDF and metadata are preserved
+    and the document can be re-indexed later via POST
+    ``/documents/retry-pending`` (or this endpoint) without re-uploading.
+    """
     try:
         document = documents_service.get_document(db, document_id)
     except DocumentNotFoundError:
@@ -229,7 +295,7 @@ def index_document(
     _require_document_access(db, user, document)
 
     result = indexer_service.index_document(db, document, uploads_dir)
-    return IndexDocumentResponse(
+    payload = IndexDocumentResponse(
         document_id=result.document_id,
         status=result.status,
         progress=result.progress,
@@ -237,3 +303,9 @@ def index_document(
         error=result.error,
         peak_rss_mb=result.peak_rss_mb,
     )
+    if result.status == DocumentStatus.PENDING_RETRY:
+        return JSONResponse(
+            status_code=status.HTTP_202_ACCEPTED,
+            content=payload.model_dump(mode="json"),
+        )
+    return payload

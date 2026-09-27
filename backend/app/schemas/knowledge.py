@@ -52,7 +52,10 @@ class DocumentResponse(BaseModel):
     folder_id: Optional[str] = Field(default=None, description="Owning folder id")
     folder_name: Optional[str] = Field(default=None, description="Owning folder name")
     status: str = Field(
-        description="Indexing status: uploaded, processing, indexed or failed"
+        description=(
+            "Indexing status: uploaded, processing, indexed, failed "
+            "or pending_retry"
+        )
     )
     chunk_count: int = Field(description="Number of indexed chunks")
     index_error: Optional[str] = Field(
@@ -78,11 +81,17 @@ class DocumentDeleteResponse(BaseModel):
 
 class IndexDocumentResponse(BaseModel):
     document_id: str = Field(description="Indexed document identifier")
-    status: str = Field(description="Final status: indexed or failed")
+    status: str = Field(
+        description=(
+            "Final status: indexed, failed or pending_retry "
+            "(HTTP 429 quota, will be retried)"
+        )
+    )
     progress: int = Field(ge=0, le=100, description="Progress percentage reached")
     chunk_count: int = Field(description="Number of chunks written")
     error: Optional[str] = Field(
-        default=None, description="Failure detail when status is 'failed'"
+        default=None,
+        description="Failure detail when status is 'failed' (never pending_retry)",
     )
     peak_rss_mb: Optional[int] = Field(
         default=None, description="Peak process RSS during indexing (MB)"

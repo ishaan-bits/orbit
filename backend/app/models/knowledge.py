@@ -27,6 +27,9 @@ class DocumentStatus:
     PROCESSING = "processing"
     INDEXED = "indexed"
     FAILED = "failed"
+    # Gemini 429 quota exhausted after backoff: file + metadata preserved,
+    # re-index later via POST /documents/retry-pending (no re-upload).
+    PENDING_RETRY = "pending_retry"
 
 
 def _uuid4() -> str:

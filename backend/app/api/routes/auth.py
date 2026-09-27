@@ -6,7 +6,6 @@ from fastapi import APIRouter, Depends, HTTPException, Response, status
 from sqlalchemy.orm import Session
 
 from app.api.deps import get_current_user
-from app.core.config import settings
 from app.core.security import SESSION_COOKIE, create_access_token
 from app.db.session import get_db
 from app.models.auth import User
@@ -22,27 +21,21 @@ router = APIRouter(tags=["auth"])
 logger = logging.getLogger("orbit.api.auth")
 
 
-def _session_cookie_samesite() -> str:
-    """SameSite policy for the session cookie.
-
-    In production (`COOKIE_SECURE=true`, HTTPS) the API may be consumed from
-    a different site than the page (direct mode via `NEXT_PUBLIC_API_URL`),
-    where browsers neither store nor send a `Lax` cookie — that surfaced as
-    "Not authenticated" right after a successful login. `None` (which legally
-    requires `Secure`) works for both cross-site and same-origin proxy modes.
-    Local HTTP development keeps `Lax`.
-    """
-    return "none" if settings.cookie_secure else "lax"
-
-
 def _set_session_cookie(response: Response, token: str) -> None:
+    """Set the cross-origin session cookie (Vercel page + Render API).
+
+    Fixed production contract: `SameSite=None; Secure` is required for the
+    browser to store a cross-site cookie at all (Safari rejects the rest),
+    no Domain attribute keeps it host-only, and max-age matches the7-day
+    session window.
+    """
     response.set_cookie(
         key=SESSION_COOKIE,
         value=token,
-        max_age=settings.jwt_expire_minutes * 60,
+        max_age=604800,
         httponly=True,
-        samesite=_session_cookie_samesite(),
-        secure=settings.cookie_secure,
+        samesite="none",
+        secure=True,
         path="/",
     )
 
@@ -52,8 +45,8 @@ def _clear_session_cookie(response: Response) -> None:
         key=SESSION_COOKIE,
         path="/",
         httponly=True,
-        samesite=_session_cookie_samesite(),
-        secure=settings.cookie_secure,
+        samesite="none",
+        secure=True,
     )
 
 

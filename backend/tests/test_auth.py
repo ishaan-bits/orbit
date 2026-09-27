@@ -46,7 +46,7 @@ def client(db_session, rbac_seed):
 
     app.dependency_overrides[get_db] = _override_get_db
 
-    with TestClient(app) as test_client:
+    with TestClient(app, base_url="https://testserver") as test_client:
         yield test_client
 
     app.dependency_overrides.clear()
@@ -79,8 +79,14 @@ def test_register_creates_user_and_sets_httponly_cookie(client: TestClient) -> N
 
     cookie_header = response.headers.get_list("set-cookie")
     session_cookie = next(c for c in cookie_header if c.startswith(SESSION_COOKIE))
-    assert "httponly" in session_cookie.lower()
-    assert "samesite=lax" in session_cookie.lower()
+    lowered = session_cookie.lower()
+    # Production session contract (Vercel + Render): cross-site, host-only,7-day
+    assert "httponly" in lowered
+    assert "samesite=none" in lowered
+    assert "secure" in lowered
+    assert "max-age=604800" in lowered
+    assert "domain=" not in lowered
+    assert "path=/" in lowered
 
 
 def test_register_normalises_email(client: TestClient) -> None:

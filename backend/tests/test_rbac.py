@@ -107,7 +107,7 @@ def client(
     app.dependency_overrides[get_db] = _override_get_db
     app.dependency_overrides[get_uploads_dir] = lambda: uploads_dir
 
-    with TestClient(app) as test_client:
+    with TestClient(app, base_url="https://testserver") as test_client:
         yield test_client
 
     app.dependency_overrides.clear()

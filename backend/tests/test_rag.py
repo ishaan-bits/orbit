@@ -74,7 +74,7 @@ def client(db_session, uploads_dir: Path, chroma_dir: Path, fake_embedder, rbac_
     app.dependency_overrides[get_db] = _override_get_db
     app.dependency_overrides[get_uploads_dir] = lambda: uploads_dir
 
-    with TestClient(app) as test_client:
+    with TestClient(app, base_url="https://testserver") as test_client:
         response = test_client.post(
             "/api/auth/register",
             json={"email": "admin@orbit.test", "password": "password123"},

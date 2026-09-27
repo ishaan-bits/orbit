@@ -13,3 +13,12 @@ class HealthResponse(BaseModel):
     rss_mb: Optional[int] = Field(
         default=None, description="Process resident memory in MB"
     )
+    embedding_provider: Optional[str] = Field(
+        default=None, description="Active embedding provider (local or gemini)"
+    )
+    gemini_key_configured: Optional[bool] = Field(
+        default=None, description="Whether GEMINI_API_KEY is set (never the key)"
+    )
+    local_model_loaded: Optional[bool] = Field(
+        default=None, description="Whether the SentenceTransformer model is in memory"
+    )

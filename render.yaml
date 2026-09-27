@@ -43,6 +43,10 @@ services:
       # 512MB instance (indexing peak drops well below the limit).
       - key: EMBEDDING_PROVIDER
         value: gemini
+      # Never silently load torch on the 512MB instance: if the Gemini API
+      # fails, indexing records an error instead of OOM-crashing the process.
+      - key: EMBEDDING_FALLBACK
+        value: none
     disk:
       name: orbit-data
       mountPath: /var/data

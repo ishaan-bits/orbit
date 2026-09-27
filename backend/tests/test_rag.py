@@ -693,6 +693,31 @@ def test_encode_texts_falls_back_to_local_when_gemini_fails(
     assert vectors == [[1.0], [1.0]]
 
 
+def test_encode_texts_propagates_gemini_failure_when_fallback_disabled(
+    monkeypatch,
+) -> None:
+    from app.rag import embedder as embedder_module
+
+    def _boom(chunk):
+        raise RuntimeError("gemini down")
+
+    local_calls: list[list[str]] = []
+
+    def _local(texts):
+        local_calls.append(texts)
+        return [[1.0] for _ in texts]
+
+    monkeypatch.setattr(app_settings, "embedding_provider", "gemini")
+    monkeypatch.setattr(app_settings, "embedding_fallback", "none")
+    monkeypatch.setattr(embedder_module, "_post_gemini_embeddings", _boom)
+    monkeypatch.setattr(embedder_module, "_encode_local", _local)
+
+    with pytest.raises(RuntimeError, match="gemini down"):
+        embedder_module.encode_texts(["a"])
+
+    assert local_calls == []
+
+
 def test_upsert_chunks_repairs_dimension_mismatch(chroma_dir: Path) -> None:
     collection = vectordb.get_collection()
     vectordb.upsert_chunks(

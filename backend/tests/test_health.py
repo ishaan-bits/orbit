@@ -27,3 +27,11 @@ def test_health_reports_rss_mb() -> None:
 
     assert isinstance(payload["rss_mb"], int)
     assert payload["rss_mb"] > 0
+
+
+def test_health_reports_embedding_state() -> None:
+    payload = client.get("/api/health").json()
+
+    assert payload["embedding_provider"] in {"local", "gemini"}
+    assert isinstance(payload["gemini_key_configured"], bool)
+    assert isinstance(payload["local_model_loaded"], bool)

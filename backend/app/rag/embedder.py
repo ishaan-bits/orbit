@@ -3,8 +3,10 @@
 ``settings.embedding_provider`` selects the backend:
 
 * ``gemini``  -- ``gemini-embedding-001`` over HTTP. Used on Render where
-  loading torch would push the 512MB instance over its limit. Falls back
-  to the local model if the API is unreachable.
+  loading torch would push the 512MB instance over its limit. On failure it
+  falls back to the local model only when ``embedding_fallback == "local"``
+  (the dev default); production sets ``EMBEDDING_FALLBACK=none`` so the
+  error surfaces instead of OOM-crashing the process.
 * ``local``   -- ``BAAI/bge-small-en-v1.5`` via SentenceTransformers, a
   process-wide singleton loaded on first use (the default everywhere).
 
@@ -53,6 +55,12 @@ def encode_texts(texts: list[str]) -> list[list[float]]:
         try:
             return _encode_gemini(texts)
         except Exception as exc:  # noqa: BLE001 - availability over failure
+            if settings.embedding_fallback != "local":
+                logger.error(
+                    "embedder.gemini_failed_no_fallback",
+                    extra={"error": str(exc)},
+                )
+                raise
             logger.warning(
                 "embedder.gemini_failed_falling_back_local",
                 extra={"error": str(exc)},
@@ -113,7 +121,8 @@ def _post_gemini_embeddings(chunk: list[str]) -> list[list[float]]:
 
     if response.status_code != 200:
         raise EmbeddingProviderError(
-            f"Gemini embedding failed with HTTP {response.status_code}"
+            f"Gemini embedding failed with HTTP {response.status_code}: "
+            f"{response.text[:200]}"
         )
 
     data = response.json()
@@ -150,6 +159,11 @@ def _limit_torch_threads() -> None:
         torch.set_num_interop_threads(1)
     except Exception:  # pragma: no cover - already-initialized pools etc.
         pass
+
+
+def local_model_loaded() -> bool:
+    """True once the SentenceTransformer singleton has been loaded."""
+    return _model is not None
 
 
 def reset_model_for_tests() -> None:

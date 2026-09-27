@@ -6,6 +6,7 @@ from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from app.core.config import settings
+from app.core.memory import rss_mb
 from app.db.session import get_db
 from app.schemas.health import HealthResponse
 
@@ -31,4 +32,5 @@ def get_health(db: Session = Depends(get_db)) -> HealthResponse:
         environment=settings.environment,
         timestamp=datetime.now(timezone.utc).isoformat(),
         checks=checks,
+        rss_mb=rss_mb(),
     )

@@ -84,6 +84,9 @@ class IndexDocumentResponse(BaseModel):
     error: Optional[str] = Field(
         default=None, description="Failure detail when status is 'failed'"
     )
+    peak_rss_mb: Optional[int] = Field(
+        default=None, description="Peak process RSS during indexing (MB)"
+    )
 
 
 class DocumentPermissionCreate(BaseModel):

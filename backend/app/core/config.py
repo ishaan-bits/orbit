@@ -17,6 +17,8 @@ class Settings(BaseSettings):
 
     gemini_api_key: str = ""
     gemini_base_url: str = "https://generativelanguage.googleapis.com/v1beta"
+    # "local" (SentenceTransformers) or "gemini" (API, low-RAM Render).
+    embedding_provider: str = "local"
     database_url: str = "sqlite:///./data/orbit.db"
     chroma_path: str = "./chroma_db"
     # absolute path; empty -> `uploads/` next to the `app` package

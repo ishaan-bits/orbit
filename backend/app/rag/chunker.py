@@ -6,7 +6,7 @@ overlap. Chunks never span pages: every chunk carries the page it came from
 and the global, ordered ``chunk_index`` of the document.
 """
 
-from collections.abc import Iterable, Sequence
+from collections.abc import Iterable, Iterator, Sequence
 from dataclasses import dataclass
 
 from app.rag.parser import Page
@@ -28,23 +28,32 @@ class Chunk:
     chunk_index: int
 
 
+def iter_chunks(
+    pages: Iterable[Page], start_index: int = 0
+) -> Iterator[Chunk]:
+    """Yield chunks incrementally with a running document-wide index.
+
+    Pages must arrive in ascending page order (streaming parsers do);
+    ``start_index`` continues numbering across separate calls. Nothing
+    beyond the current page is ever held in memory.
+    """
+    next_index = start_index
+    for page in pages:
+        if not page.text.strip():
+            continue
+        for piece in _split_with_overlap(page.text):
+            yield Chunk(
+                text=piece,
+                page=page.page_number,
+                chunk_index=next_index,
+            )
+            next_index += 1
+
+
 def chunk_pages(pages: Iterable[Page]) -> list[Chunk]:
     """Split pages into ordered chunks, preserving page metadata."""
     ordered_pages = sorted(pages, key=lambda p: p.page_number)
-    chunks: list[Chunk] = []
-    for page in ordered_pages:
-        if not page.text.strip():
-            continue
-        pieces = _split_with_overlap(page.text)
-        for piece in pieces:
-            chunks.append(
-                Chunk(
-                    text=piece,
-                    page=page.page_number,
-                    chunk_index=len(chunks),
-                )
-            )
-    return chunks
+    return list(iter_chunks(ordered_pages))
 
 
 def _split_with_overlap(

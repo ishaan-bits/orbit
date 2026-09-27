@@ -20,3 +20,10 @@ def test_health_payload_shape() -> None:
     assert payload["environment"]
     assert payload["timestamp"]
     assert payload["checks"]["database"] == "up"
+
+
+def test_health_reports_rss_mb() -> None:
+    payload = client.get("/api/health").json()
+
+    assert isinstance(payload["rss_mb"], int)
+    assert payload["rss_mb"] > 0

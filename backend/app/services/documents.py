@@ -6,6 +6,7 @@ from fastapi import UploadFile
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
+from app.core.memory import log_rss
 from app.models.knowledge import Document, Folder
 from app.rag import vectordb
 from app.services.auth import can_access_folder, get_general_folder
@@ -49,6 +50,7 @@ async def upload_document(
         raise FolderAccessDeniedError(folder.name)
 
     stored_filename, size = await save_upload(file, original_filename, uploads_dir)
+    log_rss("upload_received")
 
     document = Document(
         original_filename=original_filename,

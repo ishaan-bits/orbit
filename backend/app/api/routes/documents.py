@@ -235,4 +235,5 @@ def index_document(
         progress=result.progress,
         chunk_count=result.chunk_count,
         error=result.error,
+        peak_rss_mb=result.peak_rss_mb,
     )

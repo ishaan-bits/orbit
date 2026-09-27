@@ -1,5 +1,13 @@
-"""Indexing pipeline: parse -> chunk -> embed -> store, with status tracking."""
+"""Streaming indexing pipeline: parse -> chunk -> embed -> store per batch.
 
+Built for Render's 512MB instance: pages are consumed lazily, chunks are
+embedded in batches of at most :data:`INDEX_BATCH_SIZE` and written to
+Chroma immediately. No document-sized list (pages, chunks, embeddings) is
+ever materialized, and each batch's temporaries are dropped with a forced
+``gc.collect()``. Every stage logs RSS via ``[MEM] <stage> <rss>MB``.
+"""
+
+import gc
 import logging
 from dataclasses import dataclass
 from pathlib import Path
@@ -8,10 +16,11 @@ from typing import Optional
 from sqlalchemy import delete as sql_delete
 from sqlalchemy.orm import Session
 
+from app.core.memory import log_rss, rss_mb
 from app.models.knowledge import Document, DocumentChunk, DocumentStatus
 from app.rag import embedder, vectordb
-from app.rag.chunker import Chunk, chunk_pages
-from app.rag.parser import parse_file
+from app.rag.chunker import Chunk, iter_chunks
+from app.rag.parser import iter_file_pages
 
 logger = logging.getLogger("orbit.rag.indexer")
 
@@ -20,6 +29,9 @@ PROGRESS_PARSED = 30
 PROGRESS_CHUNKED = 50
 PROGRESS_EMBEDDED = 80
 PROGRESS_STORED = 100
+
+# Maximum chunks embedded and persisted per batch (bounded memory).
+INDEX_BATCH_SIZE = 16
 
 
 class IndexingError(Exception):
@@ -33,80 +45,136 @@ class IndexingResult:
     progress: int
     chunk_count: int
     error: Optional[str] = None
+    peak_rss_mb: Optional[int] = None
 
 
 def index_document(
     db: Session, document: Document, uploads_dir: Path
 ) -> IndexingResult:
-    """Run the full indexing pipeline for a document. Never raises."""
-    progress = 0
+    """Run the streaming indexing pipeline for a document. Never raises."""
+    progress = PROGRESS_STARTED
+    peak = rss_mb()
     document.status = DocumentStatus.PROCESSING
     document.index_error = None
     db.add(document)
     db.commit()
     db.refresh(document)
 
+    chunk_count = 0
     try:
         file_path = uploads_dir / document.stored_filename
         if not file_path.is_file():
             raise IndexingError("Stored file is missing from disk")
 
-        pages = parse_file(file_path)
-        progress = PROGRESS_PARSED
+        collection = vectordb.get_collection()
+        # Clear any previous attempt up front; batches append from here.
+        vectordb.delete_document_vectors(collection, document.id)
+        db.execute(
+            sql_delete(DocumentChunk).where(
+                DocumentChunk.document_id == document.id
+            )
+        )
+        db.commit()
 
-        chunks = chunk_pages(pages)
-        if not chunks:
+        page_count = 0
+        first_page_seen = False
+        first_flush_done = False
+        batch: list[Chunk] = []
+
+        for page in iter_file_pages(file_path):
+            page_count += 1
+            if not first_page_seen:
+                first_page_seen = True
+                progress = PROGRESS_PARSED
+            peak = max(peak, log_rss("page_extracted"))
+
+            for chunk in iter_chunks(
+                [page], start_index=chunk_count + len(batch)
+            ):
+                batch.append(chunk)
+                if len(batch) >= INDEX_BATCH_SIZE:
+                    if not first_flush_done:
+                        first_flush_done = True
+                        progress = PROGRESS_CHUNKED
+                    _flush_batch(db, document, collection, batch)
+                    chunk_count += len(batch)
+                    batch = []  # drop the temporary batch list
+                    gc.collect()
+                    peak = max(peak, rss_mb())
+
+        peak = max(peak, log_rss("chunked"))
+        if batch:
+            if not first_flush_done:
+                progress = PROGRESS_CHUNKED
+            _flush_batch(db, document, collection, batch)
+            chunk_count += len(batch)
+            batch = []
+            gc.collect()
+            peak = max(peak, rss_mb())
+
+        if chunk_count == 0:
             raise IndexingError("No text could be extracted from the document")
-        progress = PROGRESS_CHUNKED
-
-        vectors = embedder.encode_texts([chunk.text for chunk in chunks])
-        if len(vectors) != len(chunks):
-            raise IndexingError("Embedding count did not match chunk count")
         progress = PROGRESS_EMBEDDED
 
-        _store(db, document, chunks, vectors)
+        document.status = DocumentStatus.INDEXED
+        document.chunk_count = chunk_count
+        document.index_error = None
+        db.add(document)
+        db.commit()
+        db.refresh(document)
         progress = PROGRESS_STORED
+        peak = max(peak, log_rss("completed"))
     except Exception as exc:  # noqa: BLE001 - graceful failure is the contract
+        peak = max(peak, rss_mb())
         logger.error(
             "rag.indexing.failed",
             extra={
                 "document_id": document.id,
                 "error": str(exc),
                 "progress": progress,
+                "peak_rss_mb": peak,
             },
             exc_info=True,
         )
-        return _mark_failed(db, document, str(exc), progress)
+        return _mark_failed(db, document, str(exc), progress, peak)
 
     logger.info(
         "rag.indexing.completed",
         extra={
             "document_id": document.id,
-            "chunk_count": len(chunks),
-            "page_count": len(pages),
+            "chunk_count": chunk_count,
+            "page_count": page_count,
+            "peak_rss_mb": peak,
         },
     )
     return IndexingResult(
         document_id=document.id,
         status=DocumentStatus.INDEXED,
         progress=PROGRESS_STORED,
-        chunk_count=len(chunks),
+        chunk_count=chunk_count,
+        peak_rss_mb=peak,
     )
 
 
-def _store(
+def _flush_batch(
     db: Session,
     document: Document,
-    chunks: list[Chunk],
-    vectors: list[list[float]],
+    collection,
+    batch: list[Chunk],
 ) -> None:
-    collection = vectordb.get_collection()
-    vectordb.delete_document_vectors(collection, document.id)
+    """Embed one batch (<= INDEX_BATCH_SIZE chunks) and persist it now."""
+    texts = [chunk.text for chunk in batch]
+    log_rss("chunk_batch")
+
+    vectors = embedder.encode_texts(texts)
+    if len(vectors) != len(batch):
+        raise IndexingError("Embedding count did not match chunk count")
+
     vectordb.upsert_chunks(
         collection,
-        ids=[f"{document.id}:{chunk.chunk_index}" for chunk in chunks],
+        ids=[f"{document.id}:{chunk.chunk_index}" for chunk in batch],
         embeddings=vectors,
-        documents=[chunk.text for chunk in chunks],
+        documents=texts,
         metadatas=[
             {
                 "document_id": document.id,
@@ -114,12 +182,8 @@ def _store(
                 "chunk_index": chunk.chunk_index,
                 "filename": document.original_filename,
             }
-            for chunk in chunks
+            for chunk in batch
         ],
-    )
-
-    db.execute(
-        sql_delete(DocumentChunk).where(DocumentChunk.document_id == document.id)
     )
     db.add_all(
         DocumentChunk(
@@ -128,14 +192,12 @@ def _store(
             page=chunk.page,
             char_count=len(chunk.text),
         )
-        for chunk in chunks
+        for chunk in batch
     )
-    document.status = DocumentStatus.INDEXED
-    document.chunk_count = len(chunks)
-    document.index_error = None
-    db.add(document)
     db.commit()
-    db.refresh(document)
+
+    del texts, vectors  # release batch references before the gc pass
+    log_rss("embeddings_written")
 
 
 def _mark_failed(
@@ -143,6 +205,7 @@ def _mark_failed(
     document: Document,
     error: str,
     progress: int,
+    peak: int,
 ) -> IndexingResult:
     """Roll back partial work and record the failure. Never raises."""
     db.rollback()
@@ -177,4 +240,5 @@ def _mark_failed(
         progress=progress,
         chunk_count=0,
         error=error[:500],
+        peak_rss_mb=peak,
     )

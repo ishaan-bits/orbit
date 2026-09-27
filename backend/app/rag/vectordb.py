@@ -1,5 +1,6 @@
 """Persistent ChromaDB client for document chunk vectors."""
 
+import logging
 import threading
 from pathlib import Path
 from typing import Optional
@@ -9,6 +10,8 @@ import chromadb
 from app.core.config import settings
 
 COLLECTION_NAME = "orbit_documents"
+
+logger = logging.getLogger("orbit.rag.vectordb")
 
 _BACKEND_ROOT = Path(__file__).resolve().parents[2]
 
@@ -57,12 +60,46 @@ def upsert_chunks(
 ) -> None:
     if not ids:
         return
-    collection.add(
-        ids=ids,
-        embeddings=embeddings,
-        documents=documents,
-        metadatas=metadatas,
-    )
+    payload = {
+        "ids": ids,
+        "embeddings": embeddings,
+        "documents": documents,
+        "metadatas": metadatas,
+    }
+    try:
+        collection.add(**payload)
+    except Exception as exc:  # noqa: BLE001 - dimension repair is the contract
+        if not _is_dimension_error(exc):
+            raise
+        logger.warning(
+            "vectordb.dimension_mismatch_recreated",
+            extra={"error": str(exc)},
+        )
+        _recreate_collection()
+        get_collection().add(**payload)
+
+
+def _is_dimension_error(exc: Exception) -> bool:
+    return "dimension" in str(exc).lower()
+
+
+def _recreate_collection() -> None:
+    """Drop the collection after an embedding-dimension change.
+
+    Called when the embedding provider switches (e.g. local 384-dim to
+    Gemini 768-dim on Render): stored vectors are incompatible and the
+    documents must be re-indexed.
+    """
+    resolved = _resolve_path()
+    with _lock:
+        _collections.pop(resolved, None)
+        try:
+            get_client(resolved).delete_collection(name=COLLECTION_NAME)
+        except Exception:  # noqa: BLE001 - best-effort deletion
+            logger.warning(
+                "vectordb.collection_delete_failed", exc_info=True
+            )
+        _collections.pop(resolved, None)
 
 
 def delete_document_vectors(collection, document_id: str) -> None:

@@ -1,4 +1,6 @@
 import io
+import logging
+import math
 import uuid
 from pathlib import Path
 from typing import Any
@@ -15,8 +17,8 @@ from app.db.session import get_db
 from app.main import app
 from app.models.knowledge import Document, DocumentChunk, DocumentStatus
 from app.rag import embedder, vectordb
-from app.rag.chunker import CHUNK_SIZE_CHARS, OVERLAP_CHARS, chunk_pages
-from app.rag.parser import Page, ParsingError, parse_file
+from app.rag.chunker import CHUNK_SIZE_CHARS, OVERLAP_CHARS, chunk_pages, iter_chunks
+from app.rag.parser import Page, ParsingError, iter_file_pages, parse_file
 from app.services.storage import get_uploads_dir
 
 # --- fixtures ---------------------------------------------------------------
@@ -559,3 +561,158 @@ def test_index_endpoint_after_delete_returns_404(client: TestClient) -> None:
 
     response = client.post(f"/api/documents/{document['id']}/index")
     assert response.status_code == 404
+
+
+# --- streaming pipeline + memory guarantees ---------------------------------
+
+
+def test_iter_file_pages_streams_pdf_lazily(tmp_path: Path) -> None:
+    path = tmp_path / "stream.pdf"
+    path.write_bytes(make_pdf_bytes(["First streamed page", "Second page"]))
+
+    pages = iter_file_pages(path)
+    assert iter(pages) is pages  # a true generator, not a materialized list
+
+    first = next(pages)
+    assert first.page_number == 1
+    assert "First streamed page" in first.text
+    remaining = list(pages)
+    assert [p.page_number for p in remaining] == [2]
+    assert [p.page_number for p in parse_file(path)] == [1, 2]
+
+
+def test_iter_chunks_matches_chunk_pages_and_continues_indices() -> None:
+    text_a = "Alpha page text. " * 300
+    text_b = "Beta page text. " * 300
+    pages = [Page(page_number=1, text=text_a), Page(page_number=2, text=text_b)]
+
+    streamed = list(iter_chunks(pages))
+    materialized = chunk_pages(pages)
+    assert streamed == materialized
+
+    part_one = list(iter_chunks(pages[:1]))
+    part_two = list(
+        iter_chunks(pages[1:], start_index=len(part_one))
+    )
+    assert [c.chunk_index for c in part_one + part_two] == [
+        c.chunk_index for c in materialized
+    ]
+
+
+def test_index_embeds_in_batches_of_at_most_16(
+    client: TestClient, monkeypatch
+) -> None:
+    batch_sizes: list[int] = []
+    original = embedder.encode_texts
+
+    def _spy(texts):
+        batch_sizes.append(len(texts))
+        return original(texts)
+
+    monkeypatch.setattr(embedder, "encode_texts", _spy)
+
+    content = " ".join(f"Sentence {i} carries payload words." for i in range(2500))
+    document = upload_file(client, "batches.txt", content.encode())
+
+    payload = index_document(client, document["id"])
+
+    assert payload["status"] == "indexed"
+    chunk_count = payload["chunk_count"]
+    assert chunk_count > 16
+    assert batch_sizes
+    assert max(batch_sizes) <= 16
+    assert sum(batch_sizes) == chunk_count
+    assert len(batch_sizes) == math.ceil(chunk_count / 16)
+
+
+def test_index_emits_memory_stage_logs(client: TestClient, caplog) -> None:
+    with caplog.at_level(logging.INFO, logger="orbit.memory"):
+        document = upload_file(client, "memlog.txt", b"Memory stage content " * 200)
+        payload = index_document(client, document["id"])
+
+    assert payload["status"] == "indexed"
+    messages = [record.getMessage() for record in caplog.records]
+    for stage in (
+        "upload_received",
+        "page_extracted",
+        "chunk_batch",
+        "embeddings_written",
+        "completed",
+    ):
+        assert any(m.startswith(f"[MEM] {stage} ") for m in messages), stage
+
+
+def test_index_response_reports_peak_rss(client: TestClient) -> None:
+    document = upload_file(client, "peak.txt", b"Peak rss probe content. " * 100)
+
+    payload = index_document(client, document["id"])
+
+    assert payload["status"] == "indexed"
+    assert isinstance(payload["peak_rss_mb"], int)
+    assert payload["peak_rss_mb"] > 0
+
+
+# --- embedding provider dispatch + dimension repair --------------------------
+
+
+def test_encode_texts_batches_gemini_requests_at_16(monkeypatch) -> None:
+    from app.rag import embedder as embedder_module
+
+    calls: list[int] = []
+
+    def _fake_post(chunk):
+        calls.append(len(chunk))
+        return [[float(len(text)), 1.0] for text in chunk]
+
+    monkeypatch.setattr(app_settings, "embedding_provider", "gemini")
+    monkeypatch.setattr(embedder_module, "_post_gemini_embeddings", _fake_post)
+
+    texts = [f"text {i}" for i in range(40)]
+    vectors = embedder_module.encode_texts(texts)
+
+    assert len(vectors) == 40
+    assert calls == [16, 16, 8]
+
+
+def test_encode_texts_falls_back_to_local_when_gemini_fails(
+    monkeypatch,
+) -> None:
+    from app.rag import embedder as embedder_module
+
+    def _boom(chunk):
+        raise RuntimeError("gemini down")
+
+    monkeypatch.setattr(app_settings, "embedding_provider", "gemini")
+    monkeypatch.setattr(embedder_module, "_post_gemini_embeddings", _boom)
+    monkeypatch.setattr(
+        embedder_module, "_encode_local", lambda texts: [[1.0] for _ in texts]
+    )
+
+    vectors = embedder_module.encode_texts(["a", "b"])
+
+    assert vectors == [[1.0], [1.0]]
+
+
+def test_upsert_chunks_repairs_dimension_mismatch(chroma_dir: Path) -> None:
+    collection = vectordb.get_collection()
+    vectordb.upsert_chunks(
+        collection,
+        ids=["doc-a:0"],
+        embeddings=[[1.0, 0.0, 0.0]],
+        documents=["three dims"],
+        metadatas=[{"document_id": "doc-a"}],
+    )
+
+    # switching providers changes the dimension (384 local -> 768 gemini):
+    # the collection must be recreated instead of the add raising
+    vectordb.upsert_chunks(
+        collection,
+        ids=["doc-b:0"],
+        embeddings=[[0.5] * 5],
+        documents=["five dims"],
+        metadatas=[{"document_id": "doc-b"}],
+    )
+
+    fresh = vectordb.get_collection()
+    assert vectordb.count_document_vectors(fresh, "doc-b") == 1
+    assert vectordb.count_document_vectors(fresh, "doc-a") == 0

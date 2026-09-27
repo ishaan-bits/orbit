@@ -1,7 +1,10 @@
 """Document parsing: extract text page by page, preserving page numbers."""
 
+from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
+
+from app.core.memory import log_rss
 
 
 class ParsingError(Exception):
@@ -19,51 +22,62 @@ class Page:
 _TEXT_SUFFIXES = {".txt", ".md"}
 
 
-def parse_file(path: Path) -> list[Page]:
-    """Parse ``path`` into an ordered list of pages.
+def iter_file_pages(path: Path) -> Iterator[Page]:
+    """Lazily yield pages of ``path`` one at a time.
 
-    PDFs are parsed page-by-page with PyMuPDF (page numbers preserved).
-    DOCX files have no page concept, so they yield a single page (page 1).
-    Plain text/markdown files likewise yield a single page.
+    PDFs stream page-by-page with PyMuPDF so the whole document text is
+    never held in memory. DOCX and plain text files yield a single page.
+    Raises ``ParsingError`` on the first iteration for unusable files.
     """
     if not path.is_file():
         raise ParsingError(f"File not found: {path.name}")
 
     suffix = path.suffix.lower()
+    if suffix == ".pdf":
+        yield from _iter_pdf_pages(path)
+        return
+
     try:
-        if suffix == ".pdf":
-            return _parse_pdf(path)
         if suffix == ".docx":
-            return _parse_docx(path)
-        if suffix in _TEXT_SUFFIXES:
-            return _parse_text(path)
+            yield from _parse_docx(path)
+        elif suffix in _TEXT_SUFFIXES:
+            yield from _parse_text(path)
+        else:
+            raise ParsingError(f"Unsupported file type: {suffix or '(none)'}")
     except ParsingError:
         raise
     except Exception as exc:
         detail = str(exc).replace(str(path), path.name)
         raise ParsingError(f"Failed to parse {path.name}: {detail}") from exc
 
-    raise ParsingError(f"Unsupported file type: {suffix or '(none)'}")
+
+def parse_file(path: Path) -> list[Page]:
+    """Parse ``path`` into an ordered list of pages.
+
+    Convenience wrapper over :func:`iter_file_pages` for callers that
+    genuinely need the full list (small files, tests).
+    """
+    return list(iter_file_pages(path))
 
 
-def _parse_pdf(path: Path) -> list[Page]:
+def _iter_pdf_pages(path: Path) -> Iterator[Page]:
     import pymupdf
 
-    pages: list[Page] = []
     try:
         with pymupdf.open(path) as doc:
+            if doc.page_count == 0:
+                raise ParsingError(f"PDF has no pages: {path.name}")
+            log_rss("pdf_loaded")
             for index in range(doc.page_count):
-                text = doc.load_page(index).get_text("text") or ""
-                pages.append(Page(page_number=index + 1, text=_clean(text)))
+                page = doc.load_page(index)
+                text = page.get_text("text") or ""
+                yield Page(page_number=index + 1, text=_clean(text))
+                del page, text
     except ParsingError:
         raise
     except Exception as exc:
         detail = str(exc).replace(str(path), path.name)
         raise ParsingError(f"Failed to read PDF {path.name}: {detail}") from exc
-
-    if not pages:
-        raise ParsingError(f"PDF has no pages: {path.name}")
-    return pages
 
 
 def _parse_docx(path: Path) -> list[Page]:

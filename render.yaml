@@ -39,6 +39,10 @@ services:
         sync: false
       - key: GEMINI_API_KEY
         sync: false
+      # Embed via the Gemini API so the process never loads torch on the
+      # 512MB instance (indexing peak drops well below the limit).
+      - key: EMBEDDING_PROVIDER
+        value: gemini
     disk:
       name: orbit-data
       mountPath: /var/data

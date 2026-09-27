@@ -2,7 +2,7 @@
 
 /** Replace via `NEXT_PUBLIC_GITHUB_URL` at build time. */
 export const GITHUB_URL =
-  process.env.NEXT_PUBLIC_GITHUB_URL ?? "https://github.com/your-org/orbit";
+  process.env.NEXT_PUBLIC_GITHUB_URL ?? "https://github.com/ishaan-bits/orbit";
 
 export const DEMO_COMPANY = "NovaTech Systems";
 export const DEMO_PASSWORD = "Orbit123";

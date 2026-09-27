@@ -2,9 +2,12 @@
  * API origin. Default ("" = same origin) routes requests through the
  * `/api/*` rewrite in `next.config.ts`, so cookies stay first-party in
  * every environment. Set `NEXT_PUBLIC_API_URL` (e.g. the direct Render
- * URL) to bypass the proxy instead.
+ * URL) to bypass the proxy instead. Trailing slashes are normalized so
+ * `${API_BASE}/api/...` never produces a doubled slash.
  */
-export const API_BASE = process.env.NEXT_PUBLIC_API_URL ?? "";
+export const API_BASE = (process.env.NEXT_PUBLIC_API_URL ?? "")
+  .trim()
+  .replace(/\/+$/, "");
 
 export interface Folder {
   id: string;

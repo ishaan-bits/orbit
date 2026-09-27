@@ -2,7 +2,7 @@ import json
 from functools import lru_cache
 from typing import Any, Optional
 
-from pydantic import field_validator
+from pydantic import field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -49,6 +49,24 @@ class Settings(BaseSettings):
                     pass
             return [part.strip() for part in text.split(",") if part.strip()]
         return value
+
+    @model_validator(mode="after")
+    def _production_storage_defaults(self) -> "Settings":
+        """Default to the Render persistent-disk paths in production.
+
+        When ENVIRONMENT=production and a storage setting was not provided
+        (still at its local default), point it at the mounted disk at
+        `/var/data`. Local development keeps the existing relative paths.
+        """
+        if self.environment == "production":
+            fields = type(self).model_fields
+            if self.database_url == fields["database_url"].default:
+                self.database_url = "sqlite:////var/data/orbit.db"
+            if self.chroma_path == fields["chroma_path"].default:
+                self.chroma_path = "/var/data/chroma"
+            if not self.uploads_dir.strip():
+                self.uploads_dir = "/var/data/uploads"
+        return self
 
     model_config = SettingsConfigDict(
         env_file=".env",

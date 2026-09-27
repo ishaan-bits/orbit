@@ -25,7 +25,7 @@ services:
       - key: DATABASE_URL
         value: sqlite:////var/data/orbit.db
       - key: CHROMA_PATH
-        value: /var/data/chroma_db
+        value: /var/data/chroma
       - key: UPLOADS_DIR
         value: /var/data/uploads
       - key: JWT_SECRET

@@ -10,6 +10,7 @@ import {
   ChevronRight,
   Download,
   FileText,
+  Hourglass,
   Loader2,
   ShieldAlert,
 } from "lucide-react";
@@ -17,9 +18,16 @@ import { Document, Page, pdfjs } from "react-pdf";
 import "react-pdf/dist/Page/AnnotationLayer.css";
 import "react-pdf/dist/Page/TextLayer.css";
 
+import { ErrorBoundary } from "@/components/error-boundary";
 import { OrbitMark } from "@/components/landing/logo";
 import { Button } from "@/components/ui/button";
-import { api, ApiError, documentFileUrl, type DocumentMeta } from "@/lib/api";
+import {
+  api,
+  ApiError,
+  documentFileUrl,
+  type DocumentMeta,
+  type DocumentStatus,
+} from "@/lib/api";
 import { formatBytes } from "@/lib/format";
 import { cn } from "cn";
 
@@ -29,6 +37,75 @@ pdfjs.GlobalWorkerOptions.workerSrc = new URL(
 ).toString();
 
 const TEXT_EXTENSIONS = new Set(["txt", "md", "markdown"]);
+
+function formatStatus(status: DocumentStatus): string {
+  switch (status) {
+    case "indexed":
+      return "Indexed";
+    case "processing":
+      return "Indexing…";
+    case "failed":
+      return "Indexing failed";
+    case "pending_retry":
+      return "Pending retry";
+    case "uploaded":
+      return "Uploaded";
+    default:
+      return status;
+  }
+}
+
+function StatusBanner({
+  status,
+  indexError,
+}: {
+  status: DocumentStatus;
+  indexError?: string | null;
+}) {
+  if (status === "pending_retry") {
+    return (
+      <div
+        role="status"
+        data-testid="pending-retry-banner"
+        className="border-b border-amber-500/30 bg-amber-500/10 px-4 py-2.5 text-center text-sm font-medium text-amber-700 dark:text-amber-300"
+      >
+        <span className="flex items-center justify-center gap-2">
+          <Hourglass className="size-4 shrink-0" />
+          This document is uploaded successfully. AI indexing is waiting for
+          Gemini quota reset.
+        </span>
+      </div>
+    );
+  }
+  if (status === "processing") {
+    return (
+      <div
+        role="status"
+        data-testid="processing-banner"
+        className="border-b border-sky-500/30 bg-sky-500/10 px-4 py-2.5 text-center text-sm font-medium text-sky-700 dark:text-sky-300"
+      >
+        <span className="flex items-center justify-center gap-2">
+          <Loader2 className="size-4 shrink-0 animate-spin" />
+          AI indexing is in progress. The original file is already viewable.
+        </span>
+      </div>
+    );
+  }
+  if (status === "failed") {
+    return (
+      <div
+        role="status"
+        data-testid="failed-banner"
+        title={indexError ?? undefined}
+        className="border-b border-destructive/30 bg-destructive/10 px-4 py-2.5 text-center text-sm font-medium text-destructive"
+      >
+        AI indexing failed. The original file is still available to view and
+        download.
+      </div>
+    );
+  }
+  return null;
+}
 
 function parseCitedPage(raw: string | null): number | null {
   const value = Number.parseInt(raw ?? "", 10);
@@ -125,8 +202,13 @@ export function Viewer({ documentId }: { documentId: string }) {
   );
   const fileUrl = documentFileUrl(documentId);
   /* stable identity: react-pdf keys its cache on `file`, a fresh object every
-     render would reload (and unmount) the whole PDF on each state change */
-  const pdfFile = useMemo(() => ({ url: fileUrl }), [fileUrl]);
+     render would reload (and unmount) the whole PDF on each state change.
+     withCredentials makes pdf.js send the session cookie on cross-origin
+     (direct API) requests — the file endpoint is cookie-authenticated. */
+  const pdfFile = useMemo(
+    () => ({ url: fileUrl, withCredentials: true }),
+    [fileUrl],
+  );
   const pageWidth = Math.max(220, Math.min(width, 940));
 
   /* load metadata (RBAC enforced by the API) */
@@ -378,7 +460,7 @@ export function Viewer({ documentId }: { documentId: string }) {
             </p>
             <p className="truncate text-[0.7rem] text-muted-foreground">
               {formatBytes(meta.file_size)} ·{" "}
-              {meta.folder_name ?? "Unfiled"} · {meta.status}
+              {meta.folder_name ?? "Unfiled"} · {formatStatus(meta.status)}
             </p>
           </div>
         </div>
@@ -459,6 +541,7 @@ export function Viewer({ documentId }: { documentId: string }) {
     return (
       <div className="flex min-h-screen flex-col bg-background">
         {header}
+        <StatusBanner status={meta.status} indexError={meta.index_error} />
         <ViewerError status={0} filename={meta.original_filename} />
       </div>
     );
@@ -467,13 +550,49 @@ export function Viewer({ documentId }: { documentId: string }) {
   return (
     <div className="flex min-h-screen flex-col bg-background">
       {header}
+      <StatusBanner status={meta.status} indexError={meta.index_error} />
 
       {isPdf && (
         <main
           ref={mainRef}
           className="mx-auto w-full max-w-6xl flex-1 px-3 py-7 sm:px-6"
         >
-          <Document
+          <ErrorBoundary
+            fallback={(error, reset) => (
+              <div
+                className="mx-auto max-w-md space-y-3 rounded-2xl border border-border bg-card p-8 text-center"
+                data-testid="viewer-error"
+              >
+                <AlertTriangle className="mx-auto size-10 text-amber-500" />
+                <h1 className="text-lg font-semibold">
+                  The PDF could not be loaded
+                </h1>
+                <p className="text-sm text-muted-foreground">
+                  {error.message ||
+                    "Something went wrong while rendering this file."}
+                </p>
+                <div className="flex flex-wrap justify-center gap-2">
+                  <Button
+                    variant="outline"
+                    onClick={reset}
+                    data-testid="viewer-retry"
+                  >
+                    Try again
+                  </Button>
+                  <Button
+                    render={
+                      <a href={fileUrl} download={meta.original_filename} />
+                    }
+                    nativeButton={false}
+                    variant="outline"
+                  >
+                    <Download /> Download instead
+                  </Button>
+                </div>
+              </div>
+            )}
+          >
+            <Document
             file={pdfFile}
             onLoadSuccess={(pdf) => {
               setNumPages(pdf.numPages);
@@ -560,6 +679,7 @@ export function Viewer({ documentId }: { documentId: string }) {
               },
             )}
           </Document>
+          </ErrorBoundary>
         </main>
       )}
 

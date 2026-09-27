@@ -25,28 +25,29 @@ def _set_session_cookie(response: Response, token: str) -> None:
     """Set the cross-origin session cookie (Vercel page + Render API).
 
     Fixed production contract: `SameSite=None; Secure` is required for the
-    browser to store a cross-site cookie at all (Safari rejects the rest),
-    no Domain attribute keeps it host-only, and max-age matches the7-day
-    session window.
+    browser to store a cross-site cookie at all, no Domain attribute keeps
+    it host-only, and max-age matches the7-day session window.
+    `Partitioned` (CHIPS) opts the cookie into storage partitioning —
+    modern WebKit (Safari) and Chrome silently drop unpartitioned
+    third-party Set-Cookie headers.
+
+    Built as a raw header because Starlette only accepts
+    ``partitioned=True`` on Python >=3.14.
     """
-    response.set_cookie(
-        key=SESSION_COOKIE,
-        value=token,
-        max_age=604800,
-        httponly=True,
-        samesite="none",
-        secure=True,
-        path="/",
+    response.headers.append(
+        "set-cookie",
+        f"{SESSION_COOKIE}={token}; Max-Age=604800; Path=/; HttpOnly; "
+        "SameSite=none; Secure; Partitioned",
     )
 
 
 def _clear_session_cookie(response: Response) -> None:
-    response.delete_cookie(
-        key=SESSION_COOKIE,
-        path="/",
-        httponly=True,
-        samesite="none",
-        secure=True,
+    """Delete the same cookie with matching attributes (incl. Partitioned)."""
+    response.headers.append(
+        "set-cookie",
+        f'{SESSION_COOKIE}=""; Max-Age=0; '
+        "Expires=Thu, 01 Jan 1970 00:00:00 GMT; Path=/; HttpOnly; "
+        "SameSite=none; Secure; Partitioned",
     )
 
 

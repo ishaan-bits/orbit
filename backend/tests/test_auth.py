@@ -80,13 +80,15 @@ def test_register_creates_user_and_sets_httponly_cookie(client: TestClient) -> N
     cookie_header = response.headers.get_list("set-cookie")
     session_cookie = next(c for c in cookie_header if c.startswith(SESSION_COOKIE))
     lowered = session_cookie.lower()
-    # Production session contract (Vercel + Render): cross-site, host-only,7-day
+    # Production session contract (Vercel + Render): cross-site, host-only,
+    #7-day, partitioned (CHIPS) so WebKit/Chrome don't drop it
     assert "httponly" in lowered
     assert "samesite=none" in lowered
     assert "secure" in lowered
     assert "max-age=604800" in lowered
     assert "domain=" not in lowered
     assert "path=/" in lowered
+    assert "partitioned" in lowered
 
 
 def test_register_normalises_email(client: TestClient) -> None:
@@ -221,6 +223,9 @@ def test_logout_clears_session_cookie(client: TestClient) -> None:
         if c.startswith(SESSION_COOKIE)
     )
     assert "max-age=0" in cleared.lower()
+    assert "partitioned" in cleared.lower()
+    assert "httponly" in cleared.lower()
+    assert "samesite=none" in cleared.lower()
     assert client.get("/api/auth/me").status_code == 401
 
 

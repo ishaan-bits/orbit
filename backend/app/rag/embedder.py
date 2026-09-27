@@ -55,7 +55,7 @@ def encode_texts(texts: list[str]) -> list[list[float]]:
         try:
             return _encode_gemini(texts)
         except Exception as exc:  # noqa: BLE001 - availability over failure
-            if settings.embedding_fallback != "local":
+            if not _local_fallback_allowed():
                 logger.error(
                     "embedder.gemini_failed_no_fallback",
                     extra={"error": str(exc)},
@@ -66,6 +66,18 @@ def encode_texts(texts: list[str]) -> list[list[float]]:
                 extra={"error": str(exc)},
             )
     return _encode_local(texts)
+
+
+def _local_fallback_allowed() -> bool:
+    """Dev convenience only: production never loads torch (512MB Render).
+
+    The gemini failure is propagated instead so the document records a
+    clean ``index_error`` rather than the OOM killer restarting the app.
+    """
+    return (
+        settings.embedding_fallback == "local"
+        and settings.environment != "production"
+    )
 
 
 def _encode_local(texts: list[str]) -> list[list[float]]:

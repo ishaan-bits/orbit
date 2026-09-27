@@ -35,6 +35,7 @@ def get_health(db: Session = Depends(get_db)) -> HealthResponse:
         checks=checks,
         rss_mb=rss_mb(),
         embedding_provider=settings.embedding_provider,
+        embedding_fallback=settings.embedding_fallback,
         gemini_key_configured=bool(settings.gemini_api_key),
         local_model_loaded=embedder.local_model_loaded(),
     )

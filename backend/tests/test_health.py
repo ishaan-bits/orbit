@@ -33,5 +33,6 @@ def test_health_reports_embedding_state() -> None:
     payload = client.get("/api/health").json()
 
     assert payload["embedding_provider"] in {"local", "gemini"}
+    assert payload["embedding_fallback"] in {"local", "none"}
     assert isinstance(payload["gemini_key_configured"], bool)
     assert isinstance(payload["local_model_loaded"], bool)

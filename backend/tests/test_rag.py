@@ -683,6 +683,8 @@ def test_encode_texts_falls_back_to_local_when_gemini_fails(
         raise RuntimeError("gemini down")
 
     monkeypatch.setattr(app_settings, "embedding_provider", "gemini")
+    monkeypatch.setattr(app_settings, "embedding_fallback", "local")
+    monkeypatch.setattr(app_settings, "environment", "development")
     monkeypatch.setattr(embedder_module, "_post_gemini_embeddings", _boom)
     monkeypatch.setattr(
         embedder_module, "_encode_local", lambda texts: [[1.0] for _ in texts]
@@ -691,6 +693,30 @@ def test_encode_texts_falls_back_to_local_when_gemini_fails(
     vectors = embedder_module.encode_texts(["a", "b"])
 
     assert vectors == [[1.0], [1.0]]
+
+
+def test_encode_texts_never_falls_back_in_production(monkeypatch) -> None:
+    from app.rag import embedder as embedder_module
+
+    def _boom(chunk):
+        raise RuntimeError("gemini down")
+
+    local_calls: list[list[str]] = []
+
+    def _local(texts):
+        local_calls.append(texts)
+        return [[1.0] for _ in texts]
+
+    monkeypatch.setattr(app_settings, "embedding_provider", "gemini")
+    monkeypatch.setattr(app_settings, "embedding_fallback", "local")
+    monkeypatch.setattr(app_settings, "environment", "production")
+    monkeypatch.setattr(embedder_module, "_post_gemini_embeddings", _boom)
+    monkeypatch.setattr(embedder_module, "_encode_local", _local)
+
+    with pytest.raises(RuntimeError, match="gemini down"):
+        embedder_module.encode_texts(["a"])
+
+    assert local_calls == []
 
 
 def test_encode_texts_propagates_gemini_failure_when_fallback_disabled(

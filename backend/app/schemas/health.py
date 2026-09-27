@@ -16,6 +16,9 @@ class HealthResponse(BaseModel):
     embedding_provider: Optional[str] = Field(
         default=None, description="Active embedding provider (local or gemini)"
     )
+    embedding_fallback: Optional[str] = Field(
+        default=None, description="Configured embedder fallback (local or none)"
+    )
     gemini_key_configured: Optional[bool] = Field(
         default=None, description="Whether GEMINI_API_KEY is set (never the key)"
     )

@@ -19,9 +19,10 @@ class Settings(BaseSettings):
     gemini_base_url: str = "https://generativelanguage.googleapis.com/v1beta"
     # "local" (SentenceTransformers) or "gemini" (API, low-RAM Render).
     embedding_provider: str = "local"
-    # What to do when the gemini embedder fails: "local" silently loads the
-    # SentenceTransformer model (dev only — OOMs a 512MB instance), "none"
-    # propagates the failure so indexing records a clean index_error.
+    # What to do when the gemini embedder fails: "local" loads the
+    # SentenceTransformer model (dev only), "none" propagates the failure so
+    # indexing records a clean index_error. Ignored in production, where the
+    # fallback would OOM the 512MB instance and is never allowed.
     embedding_fallback: str = "local"
     database_url: str = "sqlite:///./data/orbit.db"
     chroma_path: str = "./chroma_db"

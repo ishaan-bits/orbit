@@ -10,7 +10,7 @@ class Settings(BaseSettings):
     """Application settings loaded from environment variables and `.env`."""
 
     app_name: str = "Orbit"
-    version: str = "0.1.1"
+    version: str = "0.1.2"
     environment: str = "development"
     debug: bool = True
     api_prefix: str = "/api"
@@ -35,6 +35,10 @@ class Settings(BaseSettings):
     # Shared with the Render cron job that calls POST /documents/retry-pending
     # (Authorization: Bearer <CRON_SECRET>). Empty disables cron auth.
     cron_secret: str = ""
+    # A document still marked "uploaded"/"processing" whose row has not been
+    # touched for this many minutes is considered wedged (crash/restart or a
+    # lost index call) and is re-queued by the retry cron.
+    retry_stale_after_minutes: int = 15
 
     # NovaTech demo tenant (folders + accounts):
     #   true  -> always seed (idempotent)

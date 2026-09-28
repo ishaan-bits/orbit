@@ -3,12 +3,14 @@ import json
 import logging
 import math
 import uuid
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
 import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine, select
+from sqlalchemy import update as sql_update
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
@@ -1160,3 +1162,205 @@ def test_retry_pending_keeps_parking_on_quota_and_logs_it(
     assert fetched["index_error"] is None
     file_response = client.get(f"/api/documents/{document['id']}/file")
     assert file_response.status_code == 200
+
+
+# --- wedged-document recovery (upload state machine) ------------------------
+
+
+def _force_document_state(
+    db_session,
+    document_id: str,
+    status: str,
+    age: timedelta,
+) -> None:
+    """Simulate a row left behind by a crash (or a never-run index call)."""
+    db_session.execute(
+        sql_update(Document)
+        .where(Document.id == document_id)
+        .values(
+            status=status,
+            updated_at=datetime.now(timezone.utc) - age,
+        )
+    )
+    db_session.commit()
+
+
+def test_retry_endpoint_recovers_wedged_processing_document(
+    client: TestClient, db_session, monkeypatch
+) -> None:
+    from app.api.routes import documents as documents_routes
+
+    document = upload_file(client, "wedged.txt", b"interrupted mid index")
+    _force_document_state(
+        db_session,
+        document["id"],
+        DocumentStatus.PROCESSING,
+        timedelta(hours=2),
+    )
+    monkeypatch.setattr(documents_routes, "SessionLocal", lambda: db_session)
+
+    response = client.post("/api/documents/retry-pending")
+
+    assert response.status_code == 202, response.text
+    body = response.json()
+    assert body["queued"] == 1
+    assert body["document_ids"] == [document["id"]]
+    assert body["recovered_stale"] == 1
+
+    fetched = client.get(f"/api/documents/{document['id']}").json()
+    assert fetched["status"] == "indexed"
+    assert fetched["chunk_count"] >= 1
+    assert fetched["index_error"] is None
+
+
+def test_retry_endpoint_recovers_stale_uploaded_document(
+    client: TestClient, db_session, monkeypatch
+) -> None:
+    from app.api.routes import documents as documents_routes
+
+    document = upload_file(client, "never-indexed.txt", b"index call never ran")
+    _force_document_state(
+        db_session,
+        document["id"],
+        DocumentStatus.UPLOADED,
+        timedelta(minutes=30),
+    )
+    monkeypatch.setattr(documents_routes, "SessionLocal", lambda: db_session)
+
+    response = client.post("/api/documents/retry-pending")
+
+    assert response.status_code == 202, response.text
+    body = response.json()
+    assert body["queued"] == 1
+    assert body["recovered_stale"] == 1
+
+    fetched = client.get(f"/api/documents/{document['id']}").json()
+    assert fetched["status"] == "indexed"
+
+
+def test_retry_endpoint_ignores_fresh_processing_document(
+    client: TestClient, db_session, monkeypatch
+) -> None:
+    from app.api.routes import documents as documents_routes
+
+    document = upload_file(client, "actively-indexing.txt", b"still working")
+    _force_document_state(
+        db_session,
+        document["id"],
+        DocumentStatus.PROCESSING,
+        timedelta(seconds=1),
+    )
+    monkeypatch.setattr(documents_routes, "SessionLocal", lambda: db_session)
+
+    response = client.post("/api/documents/retry-pending")
+
+    assert response.status_code == 202, response.text
+    body = response.json()
+    assert body["queued"] == 0
+    assert body["document_ids"] == []
+    assert body["recovered_stale"] == 0
+
+    fetched = client.get(f"/api/documents/{document['id']}").json()
+    assert fetched["status"] == "processing"
+
+
+def test_retry_endpoint_stale_sweep_respects_deleted_documents(
+    client: TestClient, db_session, monkeypatch
+) -> None:
+    from app.api.routes import documents as documents_routes
+
+    document = upload_file(client, "gone-mid-index.txt", b"delete while wedged")
+    _force_document_state(
+        db_session,
+        document["id"],
+        DocumentStatus.PROCESSING,
+        timedelta(hours=3),
+    )
+    assert client.delete(f"/api/documents/{document['id']}").status_code == 200
+    monkeypatch.setattr(documents_routes, "SessionLocal", lambda: db_session)
+
+    response = client.post("/api/documents/retry-pending")
+
+    assert response.status_code == 202, response.text
+    assert response.json()["queued"] == 0
+
+
+def test_upload_schedules_server_side_indexing(
+    client: TestClient, db_session, monkeypatch
+) -> None:
+    from app.api.routes import documents as documents_routes
+
+    monkeypatch.setattr(documents_routes, "SessionLocal", lambda: db_session)
+    content = " ".join(f"Auto-indexed sentence {i}." for i in range(120))
+
+    document = upload_file(client, "auto-index.txt", content.encode())
+
+    fetched = client.get(f"/api/documents/{document['id']}").json()
+    assert fetched["status"] == "indexed"
+    assert fetched["chunk_count"] >= 1
+
+
+def test_index_endpoint_provider_outage_parks_pending_retry(
+    client: TestClient, monkeypatch
+) -> None:
+    def _down(_texts):
+        raise embedder.EmbeddingProviderError("HTTP 503 from provider")
+
+    monkeypatch.setattr(embedder, "encode_texts", _down)
+    document = upload_file(client, "outage.txt", b"provider unavailable")
+
+    response = client.post(f"/api/documents/{document['id']}/index")
+
+    assert response.status_code == 202, response.text
+    assert response.json()["status"] == DocumentStatus.PENDING_RETRY
+
+    fetched = client.get(f"/api/documents/{document['id']}").json()
+    assert fetched["status"] == DocumentStatus.PENDING_RETRY
+    assert fetched["index_error"] is None
+
+
+def test_index_endpoint_returns_processing_when_lock_is_busy(
+    client: TestClient, db_session
+) -> None:
+    from app.api.routes import documents as documents_routes
+
+    document = upload_file(client, "busy.txt", b"another run owns it")
+    assert documents_routes._INDEX_LOCK.acquire(blocking=False)
+    try:
+        response = client.post(f"/api/documents/{document['id']}/index")
+    finally:
+        documents_routes._INDEX_LOCK.release()
+
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["status"] == DocumentStatus.PROCESSING
+    assert body["document_id"] == document["id"]
+
+    # the document is untouched: it is still waiting for a real run
+    fetched = client.get(f"/api/documents/{document['id']}").json()
+    assert fetched["status"] == DocumentStatus.UPLOADED
+
+
+def test_heartbeat_touches_updated_at_only_when_due(
+    db_session, uploads_dir: Path, chroma_dir: Path, fake_embedder
+) -> None:
+    import time
+
+    from app.rag.indexer import HEARTBEAT_INTERVAL_SECONDS, _heartbeat
+
+    document = _seed_document(db_session, uploads_dir, "beat.txt", b"hello")
+    db_session.refresh(document)
+    before = document.updated_at
+
+    # a fresh beat must not write
+    fresh = time.monotonic()
+    assert _heartbeat(db_session, document, fresh) == fresh
+    db_session.refresh(document)
+    assert document.updated_at == before
+
+    # an expired beat refreshes updated_at (keeps the cron sweep quiet)
+    time.sleep(0.01)
+    stale = time.monotonic() - HEARTBEAT_INTERVAL_SECONDS - 1
+    _heartbeat(db_session, document, stale)
+    db_session.refresh(document)
+    assert document.updated_at > before

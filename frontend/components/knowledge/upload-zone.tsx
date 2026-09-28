@@ -77,9 +77,10 @@ export function UploadZone({ folderId, disabled, onUploaded }: UploadZoneProps) 
       try {
         const doc = await api.uploadDocument(file, folderId);
         const indexed = await api.indexDocument(doc.id);
-        if (indexed.status === "pending_retry") {
-          // HTTP 429 quota: file + metadata preserved, re-index later
-          // without re-uploading — not an upload failure.
+        if (indexed.status === "pending_retry" || indexed.status === "processing") {
+          // pending_retry: HTTP 429 quota, re-indexed later by the cron.
+          // processing: the server-side auto-index (or a cron retry) is
+          // already running this document — either way not an upload error.
           uploaded += 1;
           setItems((prev) =>
             updateLastUploading(prev, file.name, { state: "done" }),

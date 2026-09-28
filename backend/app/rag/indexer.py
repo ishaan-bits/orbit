@@ -9,7 +9,9 @@ ever materialized, and each batch's temporaries are dropped with a forced
 
 import gc
 import logging
+import time
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
@@ -33,6 +35,11 @@ PROGRESS_STORED = 100
 # Maximum chunks embedded and persisted per batch (bounded memory).
 INDEX_BATCH_SIZE = 16
 
+# Refresh the document row this often while indexing so the retry cron's
+# stale sweep (retry_stale_after_minutes) never mistakes a live run for a
+# wedged one. One single-row commit per interval, far below any threshold.
+HEARTBEAT_INTERVAL_SECONDS = 10.0
+
 
 class IndexingError(Exception):
     """Expected pipeline failure (missing file, no text, ...)."""
@@ -51,17 +58,26 @@ class IndexingResult:
 def index_document(
     db: Session, document: Document, uploads_dir: Path
 ) -> IndexingResult:
-    """Run the streaming indexing pipeline for a document. Never raises."""
+    """Run the streaming indexing pipeline for a document. Never raises.
+
+    Every failure the process can observe ends in a terminal status:
+    ``indexed``, ``failed`` (permanent problems) or ``pending_retry``
+    (quota / provider outages, parked for the retry cron). A hard crash
+    mid-run leaves ``processing`` behind; the retry cron's stale sweep
+    re-queues those rows once they exceed ``retry_stale_after_minutes``.
+    """
     progress = PROGRESS_STARTED
     peak = rss_mb()
-    document.status = DocumentStatus.PROCESSING
-    document.index_error = None
-    db.add(document)
-    db.commit()
-    db.refresh(document)
-
     chunk_count = 0
+    page_count = 0
     try:
+        document.status = DocumentStatus.PROCESSING
+        document.index_error = None
+        db.add(document)
+        db.commit()
+        db.refresh(document)
+        beat = time.monotonic()
+
         file_path = uploads_dir / document.stored_filename
         if not file_path.is_file():
             raise IndexingError("Stored file is missing from disk")
@@ -87,6 +103,7 @@ def index_document(
                 first_page_seen = True
                 progress = PROGRESS_PARSED
             peak = max(peak, log_rss("page_extracted"))
+            beat = _heartbeat(db, document, beat)
 
             for chunk in iter_chunks(
                 [page], start_index=chunk_count + len(batch)
@@ -139,6 +156,22 @@ def index_document(
             },
         )
         return _mark_pending_retry(db, document, progress, peak)
+    except embedder.EmbeddingProviderError as exc:
+        # Transient provider outage (network, HTTP 5xx, missing key):
+        # park for the retry cron instead of failing permanently — the
+        # next scheduled run re-indexes the document in place.
+        peak = max(peak, rss_mb())
+        logger.warning(
+            "rag.indexing.pending_retry",
+            extra={
+                "document_id": document.id,
+                "progress": progress,
+                "peak_rss_mb": peak,
+                "reason": "embedding_provider_error",
+                "error": str(exc),
+            },
+        )
+        return _mark_pending_retry(db, document, progress, peak)
     except Exception as exc:  # noqa: BLE001 - graceful failure is the contract
         peak = max(peak, rss_mb())
         logger.error(
@@ -169,6 +202,21 @@ def index_document(
         chunk_count=chunk_count,
         peak_rss_mb=peak,
     )
+
+
+def _heartbeat(db: Session, document: Document, last_beat: float) -> float:
+    """Refresh ``updated_at`` at most every ``HEARTBEAT_INTERVAL_SECONDS``.
+
+    Keeps live indexing runs distinguishable from wedged rows for the
+    retry cron's stale sweep. Returns the new beat timestamp.
+    """
+    now = time.monotonic()
+    if now - last_beat < HEARTBEAT_INTERVAL_SECONDS:
+        return last_beat
+    document.updated_at = datetime.now(timezone.utc)
+    db.add(document)
+    db.commit()
+    return now
 
 
 def _flush_batch(
@@ -209,6 +257,10 @@ def _flush_batch(
         )
         for chunk in batch
     )
+    # Heartbeat with every flush: batch spacing is seconds, far below the
+    # stale threshold, so a live run never looks wedged to the cron sweep.
+    document.updated_at = datetime.now(timezone.utc)
+    db.add(document)
     db.commit()
 
     del texts, vectors  # release batch references before the gc pass

@@ -1,5 +1,6 @@
 import logging
 import mimetypes
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from threading import Lock
 from typing import Optional, Union
@@ -16,9 +17,11 @@ from fastapi import (
     status,
 )
 from fastapi.responses import FileResponse, JSONResponse
+from sqlalchemy import update as sql_update
 from sqlalchemy.orm import Session
 
 from app.api.deps import get_current_user, get_retry_caller
+from app.core.config import settings
 from app.core.retry_state import record_retry_run
 from app.db.session import SessionLocal, get_db
 from app.models.auth import User
@@ -45,13 +48,21 @@ from app.services.storage import MAX_FILE_SIZE_MB, get_uploads_dir
 router = APIRouter(tags=["documents"])
 logger = logging.getLogger("orbit.api.documents")
 
-# One background re-index at a time, so overlapping retry runs (cron +
-# manual) never embed concurrently and burst the Gemini quota.
-_RETRY_LOCK = Lock()
+# One background index run at a time across the whole process (uploads,
+# cron retries, manual re-index): overlapping runs would burst the Gemini
+# quota and write conflicting vectors.
+_INDEX_LOCK = Lock()
 
 
 def _accessible_ids(db: Session, user: User) -> Optional[set[str]]:
     return auth_service.get_accessible_document_ids(db, user)
+
+
+def _aware_utc(value: datetime) -> datetime:
+    """Normalize DB datetimes (SQLite returns naive UTC) for comparisons."""
+    if value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc)
 
 
 def _require_document_access(db: Session, user: User, document) -> None:
@@ -77,6 +88,7 @@ def _media_type(document) -> str:
     status_code=status.HTTP_201_CREATED,
 )
 async def upload_document(
+    background_tasks: BackgroundTasks,
     file: UploadFile = File(
         ..., description="PDF, DOCX, TXT or Markdown file (max 25MB)"
     ),
@@ -85,7 +97,12 @@ async def upload_document(
     uploads_dir: Path = Depends(get_uploads_dir),
     user: User = Depends(get_current_user),
 ) -> DocumentResponse:
-    """Upload a single document. Stores the file and returns its metadata."""
+    """Upload a single document. Stores the file and returns its metadata.
+
+    Indexing is scheduled server-side right after the response is sent, so
+    the document leaves ``uploaded`` even if the client disappears before
+    it can call POST /documents/{id}/index.
+    """
     try:
         document = await documents_service.upload_document(
             db, file, folder_id, uploads_dir, user=user
@@ -115,6 +132,9 @@ async def upload_document(
             status_code=status.HTTP_403_FORBIDDEN,
             detail=str(error),
         ) from error
+    background_tasks.add_task(
+        _run_index_background, document.id, uploads_dir, "upload"
+    )
     return DocumentResponse.model_validate(document)
 
 
@@ -216,67 +236,99 @@ def delete_document(
     return DocumentDeleteResponse(id=document_id, status="deleted")
 
 
-def _reindex_document_background(document_id: str, uploads_dir: Path) -> None:
-    """Re-run indexing for one parked document in a fresh DB session.
+def _run_index_background(document_id: str, uploads_dir: Path, trigger: str) -> None:
+    """Re-run indexing for one document in a fresh DB session.
 
-    Runs via BackgroundTasks after the 202 response is sent, so pending
-    documents are re-indexed in place — no re-upload needed. Emits the
-    ``retry.*`` structured outcome events and processes strictly one
-    document at a time.
+    ``trigger="cron"`` handles documents the retry endpoint parked as
+    ``pending_retry`` (including wedged ones it just re-queued) and emits
+    the ``retry.*`` structured outcome events. ``trigger="upload"``
+    auto-indexes a fresh upload (``uploaded`` → terminal status) and emits
+    ``index.background.*`` events. Runs via BackgroundTasks after the
+    response is sent; the process-wide ``_INDEX_LOCK`` keeps the work
+    strictly one document at a time.
     """
     db = SessionLocal()
+    is_cron = trigger == "cron"
+    lock_held = False
     try:
         document = db.get(Document, document_id)
         if document is None or document.deleted_at is not None:
             return
-        if document.status != DocumentStatus.PENDING_RETRY:
+        # Serialize first, then re-check status: while waiting for the
+        # lock another run (e.g. the synchronous /index call) may have
+        # already taken this document from ``uploaded``/``pending_retry``.
+        if not _INDEX_LOCK.acquire(blocking=not is_cron):
             logger.info(
-                "retry.skipped",
+                "retry.skipped" if is_cron else "index.background.skipped",
+                extra={
+                    "document_id": document_id,
+                    "reason": "another index run is already in progress",
+                },
+            )
+            return
+        lock_held = True
+        db.refresh(document)
+        expected = (
+            DocumentStatus.PENDING_RETRY if is_cron else DocumentStatus.UPLOADED
+        )
+        if document.status != expected:
+            logger.info(
+                "retry.skipped" if is_cron else "index.background.skipped",
                 extra={
                     "document_id": document_id,
                     "reason": f"status={document.status}",
                 },
             )
             return
-        if not _RETRY_LOCK.acquire(blocking=False):
-            logger.info(
-                "retry.skipped",
-                extra={
-                    "document_id": document_id,
-                    "reason": "another retry is already running",
-                },
-            )
-            return
-        try:
-            result = indexer_service.index_document(db, document, uploads_dir)
-        finally:
-            _RETRY_LOCK.release()
+        result = indexer_service.index_document(db, document, uploads_dir)
 
-        if result.status == DocumentStatus.INDEXED:
-            logger.info(
-                "retry.success",
-                extra={
-                    "document_id": document_id,
-                    "chunk_count": result.chunk_count,
-                },
-            )
-        elif result.status == DocumentStatus.PENDING_RETRY:
-            logger.warning(
-                "retry.quota",
-                extra={"document_id": document_id, "reason": "gemini_quota"},
-            )
+        if is_cron:
+            if result.status == DocumentStatus.INDEXED:
+                logger.info(
+                    "retry.success",
+                    extra={
+                        "document_id": document_id,
+                        "chunk_count": result.chunk_count,
+                    },
+                )
+            elif result.status == DocumentStatus.PENDING_RETRY:
+                logger.warning(
+                    "retry.quota",
+                    extra={"document_id": document_id, "reason": "gemini_quota"},
+                )
+            else:
+                logger.error(
+                    "retry.failed",
+                    extra={"document_id": document_id, "error": result.error},
+                )
         else:
-            logger.error(
-                "retry.failed",
-                extra={"document_id": document_id, "error": result.error},
-            )
+            if result.status == DocumentStatus.INDEXED:
+                logger.info(
+                    "index.background.completed",
+                    extra={
+                        "document_id": document_id,
+                        "chunk_count": result.chunk_count,
+                    },
+                )
+            elif result.status == DocumentStatus.PENDING_RETRY:
+                logger.warning(
+                    "index.background.parked",
+                    extra={"document_id": document_id},
+                )
+            else:
+                logger.error(
+                    "index.background.failed",
+                    extra={"document_id": document_id, "error": result.error},
+                )
     except Exception as exc:  # noqa: BLE001 - background jobs must not crash the app
         logger.error(
-            "retry.failed",
+            "retry.failed" if is_cron else "index.background.failed",
             extra={"document_id": document_id, "error": str(exc)},
             exc_info=True,
         )
     finally:
+        if lock_held:
+            _INDEX_LOCK.release()
         db.close()
 
 
@@ -293,8 +345,12 @@ def retry_pending_documents(
     """Queue background re-indexing for every ``pending_retry`` document.
 
     Used after a Gemini 429 quota burst: files and metadata were preserved
-    by the indexer, so documents are re-indexed in place. Answers 202
-    immediately; the work happens in the background, one document at a time.
+    by the indexer, so documents are re-indexed in place. Documents still
+    stuck in ``uploaded``/``processing`` for more than
+    ``retry_stale_after_minutes`` (crash or restart mid-index, or an index
+    call that never ran) are discovered here too, parked as
+    ``pending_retry`` and retried in the same run. Answers 202 immediately;
+    the work happens in the background, one document at a time.
 
     Callers: the Render cron job (``Authorization: Bearer <CRON_SECRET>``,
     retries every pending document) or an authenticated user (documents
@@ -304,9 +360,44 @@ def retry_pending_documents(
     items, _total = documents_service.list_documents(
         db, limit=500, accessible_ids=accessible_ids
     )
-    pending_ids = [
-        item.id for item in items if item.status == DocumentStatus.PENDING_RETRY
-    ]
+    now = datetime.now(timezone.utc)
+    stale_cutoff = now - timedelta(minutes=settings.retry_stale_after_minutes)
+    pending_ids: list[str] = []
+    recovered_stale: list[str] = []
+    for item in items:
+        if item.status == DocumentStatus.PENDING_RETRY:
+            pending_ids.append(item.id)
+            continue
+        if item.status not in (
+            DocumentStatus.UPLOADED,
+            DocumentStatus.PROCESSING,
+        ):
+            continue
+        if _aware_utc(item.updated_at) > stale_cutoff:
+            continue
+        # Wedged row: flip it to pending_retry with a compare-and-set on
+        # the exact state we observed, so a concurrently finishing index
+        # run (heartbeat or status change) makes the claim fail safely.
+        claim = db.execute(
+            sql_update(Document)
+            .where(
+                Document.id == item.id,
+                Document.status == item.status,
+                Document.updated_at == item.updated_at,
+            )
+            .values(
+                status=DocumentStatus.PENDING_RETRY,
+                updated_at=datetime.now(timezone.utc),
+            )
+        )
+        if claim.rowcount:
+            recovered_stale.append(item.id)
+            pending_ids.append(item.id)
+    if recovered_stale:
+        # Commit the flips here: get_db closes (and rolls back) the request
+        # session when the response is sent, while the background tasks run
+        # on fresh sessions that must see the parked rows.
+        db.commit()
     record_retry_run()
     logger.info(
         "retry.started",
@@ -314,11 +405,20 @@ def retry_pending_documents(
             "queued": len(pending_ids),
             "document_ids": pending_ids,
             "trigger": "cron" if caller is None else "api",
+            "recovered_stale": recovered_stale,
         },
     )
+    if recovered_stale:
+        logger.info(
+            "retry.stale_recovered",
+            extra={
+                "document_ids": recovered_stale,
+                "stale_after_minutes": settings.retry_stale_after_minutes,
+            },
+        )
     for document_id in pending_ids:
         background_tasks.add_task(
-            _reindex_document_background, document_id, uploads_dir
+            _run_index_background, document_id, uploads_dir, "cron"
         )
     return JSONResponse(
         status_code=status.HTTP_202_ACCEPTED,
@@ -326,6 +426,7 @@ def retry_pending_documents(
             "status": DocumentStatus.PENDING_RETRY,
             "queued": len(pending_ids),
             "document_ids": pending_ids,
+            "recovered_stale": len(recovered_stale),
         },
     )
 
@@ -347,6 +448,9 @@ def index_document(
     ``{"status": "pending_retry"}`` — the PDF and metadata are preserved
     and the document can be re-indexed later via POST
     ``/documents/retry-pending`` (or this endpoint) without re-uploading.
+    If another index run is already in progress for this process, answers
+    200 with ``{"status": "processing"}`` — the running job owns the
+    document and the retry cron recovers it if that job dies.
     """
     try:
         document = documents_service.get_document(db, document_id)
@@ -357,7 +461,22 @@ def index_document(
         ) from None
     _require_document_access(db, user, document)
 
-    result = indexer_service.index_document(db, document, uploads_dir)
+    if not _INDEX_LOCK.acquire(blocking=False):
+        # Another run (upload auto-index or cron retry) holds the lock for
+        # this process; the document continues there — answer immediately.
+        busy = IndexDocumentResponse(
+            document_id=document.id,
+            status=DocumentStatus.PROCESSING,
+            progress=0,
+            chunk_count=document.chunk_count,
+            error=None,
+            peak_rss_mb=None,
+        )
+        return JSONResponse(status_code=200, content=busy.model_dump(mode="json"))
+    try:
+        result = indexer_service.index_document(db, document, uploads_dir)
+    finally:
+        _INDEX_LOCK.release()
     payload = IndexDocumentResponse(
         document_id=result.document_id,
         status=result.status,

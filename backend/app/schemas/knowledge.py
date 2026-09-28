@@ -83,8 +83,10 @@ class IndexDocumentResponse(BaseModel):
     document_id: str = Field(description="Indexed document identifier")
     status: str = Field(
         description=(
-            "Final status: indexed, failed or pending_retry "
-            "(HTTP 429 quota, will be retried)"
+            "Resulting status: indexed, failed or pending_retry "
+            "(HTTP 429 quota, will be retried); processing when another "
+            "index run already owns the document and continues in the "
+            "background"
         )
     )
     progress: int = Field(ge=0, le=100, description="Progress percentage reached")

@@ -10,7 +10,7 @@ class Settings(BaseSettings):
     """Application settings loaded from environment variables and `.env`."""
 
     app_name: str = "Orbit"
-    version: str = "0.1.0"
+    version: str = "0.1.1"
     environment: str = "development"
     debug: bool = True
     api_prefix: str = "/api"

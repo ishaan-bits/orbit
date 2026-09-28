@@ -62,7 +62,8 @@ services:
   - type: cron
     name: orbit-retry-pending
     runtime: python
-    plan: starter
+    # Smallest cron plan (cron jobs have no free tier; $7/mo equivalent).
+    plan: 0.5c-512mb
     region: oregon
     schedule: "*/10 * * * *"
     buildCommand: "true"

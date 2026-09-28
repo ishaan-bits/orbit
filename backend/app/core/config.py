@@ -10,7 +10,7 @@ class Settings(BaseSettings):
     """Application settings loaded from environment variables and `.env`."""
 
     app_name: str = "Orbit"
-    version: str = "0.1.0"
+    version: str = "0.1.1"
     environment: str = "development"
     debug: bool = True
     api_prefix: str = "/api"
@@ -32,6 +32,9 @@ class Settings(BaseSettings):
     jwt_secret: str = ""
     jwt_expire_minutes: int = 1440
     cookie_secure: bool = False
+    # Shared with the Render cron job that calls POST /documents/retry-pending
+    # (Authorization: Bearer <CRON_SECRET>). Empty disables cron auth.
+    cron_secret: str = ""
 
     # NovaTech demo tenant (folders + accounts):
     #   true  -> always seed (idempotent)

@@ -1,7 +1,6 @@
 import logging
 import mimetypes
 from pathlib import Path
-from threading import Lock
 from typing import Optional, Union
 
 from fastapi import (
@@ -18,8 +17,7 @@ from fastapi import (
 from fastapi.responses import FileResponse, JSONResponse
 from sqlalchemy.orm import Session
 
-from app.api.deps import get_current_user, get_retry_caller
-from app.core.retry_state import record_retry_run
+from app.api.deps import get_current_user
 from app.db.session import SessionLocal, get_db
 from app.models.auth import User
 from app.models.knowledge import Document, DocumentStatus
@@ -44,10 +42,6 @@ from app.services.storage import MAX_FILE_SIZE_MB, get_uploads_dir
 
 router = APIRouter(tags=["documents"])
 logger = logging.getLogger("orbit.api.documents")
-
-# One background re-index at a time, so overlapping retry runs (cron +
-# manual) never embed concurrently and burst the Gemini quota.
-_RETRY_LOCK = Lock()
 
 
 def _accessible_ids(db: Session, user: User) -> Optional[set[str]]:
@@ -220,61 +214,18 @@ def _reindex_document_background(document_id: str, uploads_dir: Path) -> None:
     """Re-run indexing for one parked document in a fresh DB session.
 
     Runs via BackgroundTasks after the 202 response is sent, so pending
-    documents are re-indexed in place — no re-upload needed. Emits the
-    ``retry.*`` structured outcome events and processes strictly one
-    document at a time.
+    documents are re-indexed in place — no re-upload needed.
     """
     db = SessionLocal()
     try:
         document = db.get(Document, document_id)
         if document is None or document.deleted_at is not None:
             return
-        if document.status != DocumentStatus.PENDING_RETRY:
-            logger.info(
-                "retry.skipped",
-                extra={
-                    "document_id": document_id,
-                    "reason": f"status={document.status}",
-                },
-            )
-            return
-        if not _RETRY_LOCK.acquire(blocking=False):
-            logger.info(
-                "retry.skipped",
-                extra={
-                    "document_id": document_id,
-                    "reason": "another retry is already running",
-                },
-            )
-            return
-        try:
-            result = indexer_service.index_document(db, document, uploads_dir)
-        finally:
-            _RETRY_LOCK.release()
-
-        if result.status == DocumentStatus.INDEXED:
-            logger.info(
-                "retry.success",
-                extra={
-                    "document_id": document_id,
-                    "chunk_count": result.chunk_count,
-                },
-            )
-        elif result.status == DocumentStatus.PENDING_RETRY:
-            logger.warning(
-                "retry.quota",
-                extra={"document_id": document_id, "reason": "gemini_quota"},
-            )
-        else:
-            logger.error(
-                "retry.failed",
-                extra={"document_id": document_id, "error": result.error},
-            )
-    except Exception as exc:  # noqa: BLE001 - background jobs must not crash the app
-        logger.error(
-            "retry.failed",
-            extra={"document_id": document_id, "error": str(exc)},
-            exc_info=True,
+        indexer_service.index_document(db, document, uploads_dir)
+    except Exception:  # noqa: BLE001 - background jobs must not crash the app
+        logger.exception(
+            "documents.retry_background_failed",
+            extra={"document_id": document_id},
         )
     finally:
         db.close()
@@ -288,34 +239,20 @@ def retry_pending_documents(
     background_tasks: BackgroundTasks,
     db: Session = Depends(get_db),
     uploads_dir: Path = Depends(get_uploads_dir),
-    caller: Optional[User] = Depends(get_retry_caller),
+    user: User = Depends(get_current_user),
 ) -> JSONResponse:
     """Queue background re-indexing for every ``pending_retry`` document.
 
     Used after a Gemini 429 quota burst: files and metadata were preserved
     by the indexer, so documents are re-indexed in place. Answers 202
-    immediately; the work happens in the background, one document at a time.
-
-    Callers: the Render cron job (``Authorization: Bearer <CRON_SECRET>``,
-    retries every pending document) or an authenticated user (documents
-    the user can access).
+    immediately; the work happens in the background.
     """
-    accessible_ids = None if caller is None else _accessible_ids(db, caller)
     items, _total = documents_service.list_documents(
-        db, limit=500, accessible_ids=accessible_ids
+        db, limit=500, accessible_ids=_accessible_ids(db, user)
     )
     pending_ids = [
         item.id for item in items if item.status == DocumentStatus.PENDING_RETRY
     ]
-    record_retry_run()
-    logger.info(
-        "retry.started",
-        extra={
-            "queued": len(pending_ids),
-            "document_ids": pending_ids,
-            "trigger": "cron" if caller is None else "api",
-        },
-    )
     for document_id in pending_ids:
         background_tasks.add_task(
             _reindex_document_background, document_id, uploads_dir

@@ -1,12 +1,8 @@
 """Shared FastAPI dependencies for authentication."""
 
-import hmac
-from typing import Optional
-
 from fastapi import Depends, HTTPException, Request, status
 from sqlalchemy.orm import Session
 
-from app.core.config import settings
 from app.core.security import SESSION_COOKIE, decode_access_token
 from app.db.session import get_db
 from app.models.auth import User
@@ -44,19 +40,3 @@ def get_current_user(request: Request, db: Session = Depends(get_db)) -> User:
     if user is None or not user.is_active:
         raise _unauthenticated("Session is invalid or has expired")
     return user
-
-
-def get_retry_caller(request: Request, db: Session = Depends(get_db)) -> Optional[User]:
-    """Resolve the caller of ``POST /documents/retry-pending``.
-
-    The Render cron job authenticates with ``Authorization: Bearer
-    <CRON_SECRET>`` and is treated as the system caller (returns ``None``,
-    so the retry covers every pending document). Any other request must
-    carry a valid session like the rest of the API.
-    """
-    authorization = request.headers.get("authorization", "")
-    if authorization.lower().startswith("bearer "):
-        token = authorization[7:].strip()
-        if settings.cron_secret and hmac.compare_digest(token, settings.cron_secret):
-            return None
-    return get_current_user(request, db)

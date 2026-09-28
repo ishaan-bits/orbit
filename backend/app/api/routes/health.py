@@ -7,7 +7,6 @@ from sqlalchemy.orm import Session
 
 from app.core.config import settings
 from app.core.memory import rss_mb
-from app.core.retry_state import last_retry_at
 from app.db.session import get_db
 from app.rag import embedder
 from app.schemas.health import HealthResponse
@@ -39,5 +38,4 @@ def get_health(db: Session = Depends(get_db)) -> HealthResponse:
         embedding_fallback=settings.embedding_fallback,
         gemini_key_configured=bool(settings.gemini_api_key),
         local_model_loaded=embedder.local_model_loaded(),
-        last_retry_at=last_retry_at(),
     )

@@ -25,7 +25,3 @@ class HealthResponse(BaseModel):
     local_model_loaded: Optional[bool] = Field(
         default=None, description="Whether the SentenceTransformer model is in memory"
     )
-    last_retry_at: Optional[str] = Field(
-        default=None,
-        description="ISO-8601 UTC timestamp of the last retry-pending run",
-    )

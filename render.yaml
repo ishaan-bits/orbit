@@ -39,10 +39,6 @@ services:
         sync: false
       - key: GEMINI_API_KEY
         sync: false
-      # Shared with the retry cron job below; the cron authenticates with
-      # "Authorization: Bearer <CRON_SECRET>" against POST /documents/retry-pending.
-      - key: CRON_SECRET
-        generateValue: true
       # Embed via the Gemini API so the process never loads torch on the
       # 512MB instance (indexing peak drops well below the limit).
       - key: EMBEDDING_PROVIDER
@@ -55,30 +51,3 @@ services:
       name: orbit-data
       mountPath: /var/data
       sizeGB: 1
-
-  # Background retry for quota-parked documents (status=pending_retry).
-  # Every 10 minutes: POST /api/documents/retry-pending, which re-indexes
-  # pending documents one-by-one and keeps them parked on a fresh 429.
-  - type: cron
-    name: orbit-retry-pending
-    runtime: python
-    # Smallest cron plan (cron jobs have no free tier; $7/mo equivalent).
-    plan: 0.5c-512mb
-    region: oregon
-    schedule: "*/10 * * * *"
-    buildCommand: "true"
-    startCommand: >-
-      curl -fsS --max-time 60 -X POST
-      -H "Authorization: Bearer ${CRON_SECRET}"
-      "https://${API_HOSTNAME}/api/documents/retry-pending"
-    envVars:
-      - key: CRON_SECRET
-        fromService:
-          name: orbit-api
-          type: web
-          envVarKey: CRON_SECRET
-      - key: API_HOSTNAME
-        fromService:
-          name: orbit-api
-          type: web
-          envVarKey: RENDER_EXTERNAL_HOSTNAME
